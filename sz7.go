@@ -14,6 +14,9 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -26,7 +29,9 @@ type SZOptions struct {
 	Password   string
 	SolidBlock int64 // 每个固实块的最大原始字节数
 	Threads    int
-	Dict       int64 // 用户指定的 LZMA2 字典大小（-md），0 = 按级别
+	Dict       int64  // 用户指定的 LZMA2 字典大小（-md），0 = 按级别
+	HeaderEnc  bool   // -mhe 加密头部（文件名列表）
+	BCJ        string // on/off/auto（默认 auto：代码类 ≥50% 的固实块启用）
 }
 
 type szFolder struct {
@@ -37,7 +42,59 @@ type szFolder struct {
 	codedSize  int64 // AES 之前（LZMA2 输出）的大小
 	iv         []byte
 	crcs       []uint32
+	bcj        bool // 该 folder 使用 x86 BCJ 过滤器
 	err        error
+}
+
+// shouldBCJ 决定一个固实块是否使用 x86 BCJ：可执行/目标码占比 ≥ 50%。
+func shouldBCJ(files []*InputFile, unpackSize int64) bool {
+	if unpackSize == 0 {
+		return false
+	}
+	var codeSize int64
+	for _, f := range files {
+		if categoryRank(f.Name) == 1 {
+			codeSize += f.Size
+		}
+	}
+	return codeSize*2 >= unpackSize
+}
+
+// categoryRank 按扩展名把文件归类，用于固实分组：同类型数据相邻，
+// 提升跨文件匹配率（7-Zip 官方分块策略的简化版）。
+func categoryRank(name string) int {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".txt", ".md", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
+		".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx", ".go", ".py", ".rb",
+		".rs", ".c", ".h", ".cpp", ".hpp", ".cc", ".java", ".kt", ".swift", ".sql",
+		".sh", ".bash", ".bat", ".ps1", ".ini", ".cfg", ".conf", ".toml", ".proto":
+		return 0 // 文本与代码
+	case ".exe", ".dll", ".sys", ".ocx", ".so", ".dylib", ".o", ".obj", ".a",
+		".lib", ".elf", ".bin", ".msi", ".deb", ".rpm":
+		return 1 // 可执行与目标码
+	case ".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".br",
+		".tar", ".jar", ".apk", ".iso", ".dmg", ".png", ".jpg", ".jpeg", ".gif",
+		".webp", ".mp3", ".mp4", ".mkv", ".avi", ".mov", ".pdf":
+		return 3 // 已压缩/富媒体：再去重收益低，放后面
+	default:
+		return 2 // 其余
+	}
+}
+
+// orderForSolid 返回按 (类型, 名称) 稳定排序的文件列表；
+// 目录与空文件保持相对顺序不变。
+func orderForSolid(files []*InputFile) []*InputFile {
+	out := make([]*InputFile, len(files))
+	copy(out, files)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := categoryRank(out[i].Name), categoryRank(out[j].Name)
+		if ri != rj {
+			return ri < rj
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 func write7z(out string, files []*InputFile, opt SZOptions, prog *Progress) error {
@@ -47,6 +104,7 @@ func write7z(out string, files []*InputFile, opt SZOptions, prog *Progress) erro
 	if opt.SolidBlock <= 0 {
 		opt.SolidBlock = 64 << 20
 	}
+	files = orderForSolid(files)
 	// 分块
 	var folders []*szFolder
 	var cur *szFolder
@@ -60,6 +118,11 @@ func write7z(out string, files []*InputFile, opt SZOptions, prog *Progress) erro
 		}
 		cur.files = append(cur.files, f)
 		cur.unpackSize += f.Size
+	}
+	if opt.BCJ == "on" || opt.BCJ == "auto" {
+		for _, fd := range folders {
+			fd.bcj = opt.BCJ == "on" || shouldBCJ(fd.files, fd.unpackSize)
+		}
 	}
 
 	var key []byte
@@ -114,6 +177,19 @@ func write7z(out string, files []*InputFile, opt SZOptions, prog *Progress) erro
 		packTotal += n
 	}
 	hdr := build7zHeader(files, folders, opt)
+	if opt.HeaderEnc && key != nil {
+		var packed, si []byte
+		packed, si, err = encode7zHeader(hdr, key, packTotal)
+		if err != nil {
+			return err
+		}
+		// packed 头数据属于 pack 区，写在 streams-info 之前
+		if _, err := o.Write(packed); err != nil {
+			return err
+		}
+		packTotal += int64(len(packed))
+		hdr = si
+	}
 	if _, err := o.Write(hdr); err != nil {
 		return err
 	}
@@ -164,6 +240,7 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 	codedCounter := &countWriter{w: sink}
 	var enc io.Writer = codedCounter
 	var lz *lzma.Writer2
+	var bcjW *bcjX86Writer
 	if opt.Level > 0 {
 		cfg := lzma.Writer2Config{DictCap: resolveDict(opt.Dict, opt.Level, fd.unpackSize)}
 		lz, err = cfg.NewWriter2(codedCounter)
@@ -171,6 +248,10 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 			return err
 		}
 		enc = lz
+		if fd.bcj {
+			bcjW = newBCJX86Writer(enc)
+			enc = bcjW
+		}
 	}
 	buf := make([]byte, 1<<20)
 	for _, f := range fd.files {
@@ -191,6 +272,11 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 		fd.crcs = append(fd.crcs, h.Sum32())
 	}
 	if lz != nil {
+		if bcjW != nil {
+			if err := bcjW.Close(); err != nil { // 先冲刷 BCJ 尾部，再关 LZMA2
+				return err
+			}
+		}
 		if err := lz.Close(); err != nil {
 			return err
 		}
@@ -203,6 +289,91 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 	fd.codedSize = codedCounter.n
 	fd.packSize = packCounter.n
 	return nil
+}
+
+// ---------- kEncodedHeader（-mhe 头部加密） ----------
+
+// encode7zHeader 把明文头部用 LZMA2 压缩 + 7zAES 加密，封装为
+// kEncodedHeader 记录。packPos 相对归档 pack 区起点（签名头之后）。
+func encode7zHeader(hdr []byte, key []byte, packTotal int64) ([]byte, []byte, error) {
+	const hDict = 1 << 20
+	// 1) LZMA2 压缩
+	var comp bytes.Buffer
+	lz, err := (lzma.Writer2Config{DictCap: hDict}).NewWriter2(&comp)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := lz.Write(hdr); err != nil {
+		return nil, nil, err
+	}
+	if err := lz.Close(); err != nil {
+		return nil, nil, err
+	}
+	raw := comp.Bytes()
+	// 2) AES-CBC 加密（新 IV）
+	iv := make([]byte, 16)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, nil, err
+	}
+	var enc bytes.Buffer
+	aesW, err := newCBCWriter(&enc, key, iv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := aesW.Write(raw); err != nil {
+		return nil, nil, err
+	}
+	if err := aesW.Close(); err != nil {
+		return nil, nil, err
+	}
+	packed := enc.Bytes()
+	// 3) kEncodedHeader + StreamsInfo
+	// packed 数据物理位置 = 头记录起点 + 头记录前缀长度，packPos 是相对
+	// pack 区起点（签名头之后）的偏移。前缀长度本身依赖 packPos 的变长
+	// 编码长度，无需不动点迭代。
+	rest := &hbuf{}           // kUnpackInfo 及之后
+	rest.WriteByte(0x07)      // kUnpackInfo
+	rest.WriteByte(0x0B)      // kFolder
+	rest.num(1)
+	rest.WriteByte(0x00) // external
+	rest.num(2)          // 两个 coder
+	// coder0: 7zAES
+	rest.WriteByte(0x24)
+	rest.Write([]byte{0x06, 0xF1, 0x07, 0x01})
+	props := append([]byte{0x40 | 19, 0x0F}, iv...)
+	rest.num(uint64(len(props)))
+	rest.Write(props)
+	// coder1: LZMA2
+	rest.WriteByte(0x21)
+	rest.WriteByte(0x21)
+	rest.num(1)
+	rest.WriteByte(lzma2DictProp(hDict))
+	// bind pair: coder0 输出 -> coder1 输入
+	rest.num(1)
+	rest.num(0)
+	rest.WriteByte(0x0C) // kCodersUnpackSize
+	rest.num(uint64(len(raw)))  // coder0（AES）输出 = LZMA2 流大小
+	rest.num(uint64(len(hdr)))  // coder1（LZMA2）输出 = 明文头部大小
+	rest.WriteByte(0x0A) // kCRC
+	rest.WriteByte(0x01) // all defined
+	var crcB [4]byte
+	binary.LittleEndian.PutUint32(crcB[:], crc32.ChecksumIEEE(hdr))
+	rest.Write(crcB[:])
+	// 注意：kCRC 之后没有 end 字节，直接接 end-UnpackInfo
+	rest.WriteByte(0x00) // end UnpackInfo
+	rest.WriteByte(0x00) // end StreamsInfo
+
+	si := &hbuf{}
+	si.WriteByte(0x17) // kEncodedHeader
+	si.WriteByte(0x06) // kPackInfo
+	si.num(uint64(packTotal))
+	si.num(1)
+	si.WriteByte(0x09) // kSize
+	si.num(uint64(len(packed)))
+	si.WriteByte(0x00)
+	si.Write(rest.Bytes())
+	// packed 数据、streams-info 由调用方分别写入（packed 属于 pack 区）
+	return packed, si.Bytes(), nil
 }
 
 // ---------- 7zAES ----------
@@ -342,10 +513,18 @@ func build7zHeader(files []*InputFile, folders []*szFolder, opt SZOptions) []byt
 		}
 		b.WriteByte(0x0C)
 		for _, fd := range folders {
-			if opt.Password != "" {
-				b.num(uint64(fd.codedSize))
+			if fd.bcj {
+				if opt.Password != "" {
+					b.num(uint64(fd.codedSize)) // coder AES 输出
+				}
+				b.num(uint64(fd.unpackSize)) // coder LZMA2 输出
+				b.num(uint64(fd.unpackSize)) // coder BCJ 输出（= 最终解包大小）
+			} else {
+				if opt.Password != "" {
+					b.num(uint64(fd.codedSize)) // coder AES 输出
+				}
+				b.num(uint64(fd.unpackSize)) // coder LZMA2/Copy 输出
 			}
-			b.num(uint64(fd.unpackSize))
 		}
 		b.WriteByte(0x00)
 		// SubStreamsInfo
@@ -448,6 +627,18 @@ func build7zHeader(files []*InputFile, folders []*szFolder, opt SZOptions) []byt
 }
 
 func writeFolder(b *hbuf, fd *szFolder, opt SZOptions) {
+	nCoders := 1
+	if opt.Password != "" {
+		nCoders = 2
+	}
+	if fd.bcj {
+		nCoders++
+	}
+	writeBCJ := func() {
+		// x86 BCJ：id 03 03 01 03，无属性（flag 0x04 = idSize 4）
+		b.WriteByte(0x04)
+		b.Write([]byte{0x03, 0x03, 0x01, 0x03})
+	}
 	writeMain := func() {
 		if opt.Level == 0 {
 			b.WriteByte(0x01) // id size 1, 无属性
@@ -460,21 +651,45 @@ func writeFolder(b *hbuf, fd *szFolder, opt SZOptions) {
 		b.num(1)
 		b.WriteByte(lzma2DictProp(dict))
 	}
-	if opt.Password == "" {
-		b.num(1)
-		writeMain()
-		return
+	if fd.bcj && opt.Level == 0 {
+		// 存储模式下 BCJ 无意义，忽略
+		fd.bcj = false
 	}
-	b.num(2)
-	// coder 0: 7zAES
-	b.WriteByte(0x24)
-	b.Write([]byte{0x06, 0xF1, 0x07, 0x01})
-	props := append([]byte{0x40 | 19, 0x0F}, fd.iv...)
-	b.num(uint64(len(props)))
-	b.Write(props)
-	// coder 1: LZMA2 / Copy
-	writeMain()
-	// bind pair: coder1 输入 <- coder0 输出
-	b.num(1)
-	b.num(0)
+	b.num(uint64(nCoders))
+	switch {
+	case fd.bcj && opt.Password != "":
+		// 解码顺序：coder0: 7zAES, coder1: LZMA2, coder2: BCJ
+		b.WriteByte(0x24)
+		b.Write([]byte{0x06, 0xF1, 0x07, 0x01})
+		props := append([]byte{0x40 | 19, 0x0F}, fd.iv...)
+		b.num(uint64(len(props)))
+		b.Write(props)
+		writeMain()
+		writeBCJ()
+		// 绑定：LZMA2 输入 <- AES 输出；BCJ 输入 <- LZMA2 输出
+		b.num(1) // in: LZMA2 的输入流
+		b.num(0) // out: AES 的输出流
+		b.num(2) // in: BCJ 的输入流
+		b.num(1) // out: LZMA2 的输出流
+	case fd.bcj:
+		// 解码顺序：coder0: LZMA2, coder1: BCJ
+		writeMain()
+		writeBCJ()
+		b.num(1) // in: BCJ 的输入流
+		b.num(0) // out: LZMA2 的输出流
+	case opt.Password != "":
+		// coder0: 7zAES
+		b.WriteByte(0x24)
+		b.Write([]byte{0x06, 0xF1, 0x07, 0x01})
+		props := append([]byte{0x40 | 19, 0x0F}, fd.iv...)
+		b.num(uint64(len(props)))
+		b.Write(props)
+		// coder1: LZMA2 / Copy
+		writeMain()
+		// bind pair: coder1 输入 <- coder0 输出
+		b.num(1)
+		b.num(0)
+	default:
+		writeMain()
+	}
 }

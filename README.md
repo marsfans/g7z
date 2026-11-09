@@ -35,12 +35,20 @@ g7z h -scrcSHA256 file.iso
 格式按文件头魔数识别，不依赖扩展名。
 
 ## 7z 风格参数
-`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-md=64m` LZMA2 字典大小（7z/xz，覆盖 -mx 默认值）、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
+`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-md=64m` LZMA2 字典大小（7z/xz，覆盖 -mx 默认值）、`-mhe` 头部加密（7z+密码）、`-bcj=on|auto` x86 BCJ 过滤器（可执行文件，默认 off）、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
 
 ## 配置
 `g7z config init` 生成 `g7z.yaml`（查找顺序：`--config`、`$G7Z_CONFIG`、`./g7z.yaml`、用户配置目录 `g7z/g7z.yaml`、`~/g7z.yaml`）。环境变量 `G7Z_LEVEL`、`G7Z_THREADS` 等同样生效。
 
 ## 说明
-- 7z 写入为自研：每个固实块一个 LZMA2 folder，多线程并行压缩；生成的 7z（含 AES 加密）已通过官方 7-Zip 25.01 `t`/`x` 校验。
+- 7z 写入为自研：每个固实块一个 LZMA2 folder，多线程并行压缩；固实前按文件类型聚类排序；生成的 7z（含 AES 加密、-mhe 头部加密、BCJ 过滤）已通过官方 7-Zip `t`/`x` 校验。
 - 7z 写入暂不支持头部加密（-mhe）和向已有归档追加；RAR 只读。
 - 退出码：0 成功，2 出错。
+
+## 压缩基准
+
+```bash
+./bench/run.sh [语料目录]   # 缺省生成合成语料；建议传入真实文件目录
+```
+
+对比 g7z 与官方 7-Zip 的压缩率/速度，并做解压往返校验。

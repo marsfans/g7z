@@ -34,7 +34,9 @@ type AddOptions struct {
 	Password  string
 	Threads   int
 	Solid     int64
-	Dict      int64 // LZMA2 字典大小覆盖（-md / --md），0 = 按级别
+	Dict      int64
+	MHE       bool  // -mhe 头部加密
+	BCJ       string // on/off/auto // LZMA2 字典大小覆盖（-md / --md），0 = 按级别
 	Excludes  []string
 	Recursive bool
 }
@@ -155,7 +157,7 @@ func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progres
 	var err error
 	switch {
 	case fm.Name == "7z":
-		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads, Dict: opt.Dict}, prog)
+		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads, Dict: opt.Dict, HeaderEnc: opt.MHE, BCJ: opt.BCJ}, prog)
 	case fm.Name == "zip":
 		err = writeZip(tmpOut, files, opt, prog)
 	case fm.Archive: // tar.*
