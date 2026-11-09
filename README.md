@@ -35,7 +35,7 @@ g7z h -scrcSHA256 file.iso
 格式按文件头魔数识别，不依赖扩展名。
 
 ## 7z 风格参数
-`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
+`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-md=64m` LZMA2 字典大小（7z/xz，覆盖 -mx 默认值）、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
 
 ## 配置
 `g7z config init` 生成 `g7z.yaml`（查找顺序：`--config`、`$G7Z_CONFIG`、`./g7z.yaml`、用户配置目录 `g7z/g7z.yaml`、`~/g7z.yaml`）。环境变量 `G7Z_LEVEL`、`G7Z_THREADS` 等同样生效。

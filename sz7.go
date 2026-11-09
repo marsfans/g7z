@@ -22,10 +22,11 @@ import (
 )
 
 type SZOptions struct {
-	Level      int // 0 = 仅存储
+	Level      int   // 0 = 仅存储
 	Password   string
 	SolidBlock int64 // 每个固实块的最大原始字节数
 	Threads    int
+	Dict       int64 // 用户指定的 LZMA2 字典大小（-md），0 = 按级别
 }
 
 type szFolder struct {
@@ -164,10 +165,7 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 	var enc io.Writer = codedCounter
 	var lz *lzma.Writer2
 	if opt.Level > 0 {
-		cfg := lzma.Writer2Config{DictCap: dictForLevel(opt.Level)}
-		if int64(cfg.DictCap) > fd.unpackSize && fd.unpackSize >= lzma.MinDictCap {
-			cfg.DictCap = int(fd.unpackSize)
-		}
+		cfg := lzma.Writer2Config{DictCap: resolveDict(opt.Dict, opt.Level, fd.unpackSize)}
 		lz, err = cfg.NewWriter2(codedCounter)
 		if err != nil {
 			return err
@@ -456,10 +454,7 @@ func writeFolder(b *hbuf, fd *szFolder, opt SZOptions) {
 			b.WriteByte(0x00) // Copy
 			return
 		}
-		dict := dictForLevel(opt.Level)
-		if int64(dict) > fd.unpackSize && fd.unpackSize >= lzma.MinDictCap {
-			dict = int(fd.unpackSize)
-		}
+		dict := resolveDict(opt.Dict, opt.Level, fd.unpackSize)
 		b.WriteByte(0x21) // id size 1 + 属性
 		b.WriteByte(0x21) // LZMA2
 		b.num(1)

@@ -34,6 +34,7 @@ type AddOptions struct {
 	Password  string
 	Threads   int
 	Solid     int64
+	Dict      int64 // LZMA2 字典大小覆盖（-md / --md），0 = 按级别
 	Excludes  []string
 	Recursive bool
 }
@@ -154,7 +155,7 @@ func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progres
 	var err error
 	switch {
 	case fm.Name == "7z":
-		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads}, prog)
+		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads, Dict: opt.Dict}, prog)
 	case fm.Name == "zip":
 		err = writeZip(tmpOut, files, opt, prog)
 	case fm.Archive: // tar.*
@@ -275,7 +276,7 @@ func writeTar(out string, files []*InputFile, codec string, opt AddOptions, prog
 	var w io.Writer = o
 	var cw io.WriteCloser
 	if codec != "" {
-		cw, err = newCompressor(codec, o, opt.Level, opt.Threads)
+		cw, err = newCompressor(codec, o, opt.Level, opt.Threads, opt.Dict)
 		if err != nil {
 			return err
 		}
@@ -330,7 +331,7 @@ func writeSingle(out string, files []*InputFile, codec string, opt AddOptions, p
 		return err
 	}
 	defer o.Close()
-	cw, err := newCompressor(codec, o, opt.Level, opt.Threads)
+	cw, err := newCompressor(codec, o, opt.Level, opt.Threads, opt.Dict)
 	if err != nil {
 		return err
 	}

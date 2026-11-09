@@ -15,6 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
 )
 
 // Format 描述一种压缩/归档格式
@@ -191,7 +192,7 @@ func newDecompressor(codec string, r io.Reader) (io.ReadCloser, error) {
 }
 
 // newCompressor level 取 0-9（7z 的 -mx 语义），threads 为线程数
-func newCompressor(codec string, w io.Writer, level, threads int) (io.WriteCloser, error) {
+func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.WriteCloser, error) {
 	if level < 1 {
 		level = 1
 	}
@@ -204,7 +205,7 @@ func newCompressor(codec string, w io.Writer, level, threads int) (io.WriteClose
 	case "bz2":
 		return bzip2.NewWriter(w, &bzip2.WriterConfig{Level: level})
 	case "xz":
-		cfg := xz.WriterConfig{DictCap: dictForLevel(level)}
+		cfg := xz.WriterConfig{DictCap: resolveDict(md, level, 0)}
 		return cfg.NewWriter(w)
 	case "zst":
 		lv := zstd.SpeedDefault
@@ -235,13 +236,14 @@ func newCompressor(codec string, w io.Writer, level, threads int) (io.WriteClose
 	return nil, fmt.Errorf("未知压缩算法 %s", codec)
 }
 
-// dictForLevel 与 7-Zip 的 -mx 级别大致对应的 LZMA2 字典大小
+// dictForLevel 与 7-Zip 官方 -mx 级别的 LZMA2 字典大小一致：
+// 1:64k 3:1m 5:16m 7:32m 9:64m（中间级别取相邻档）
 func dictForLevel(level int) int {
 	switch {
 	case level <= 1:
-		return 1 << 20
+		return 1 << 16
 	case level <= 3:
-		return 4 << 20
+		return 1 << 20
 	case level <= 5:
 		return 16 << 20
 	case level <= 7:
@@ -249,4 +251,26 @@ func dictForLevel(level int) int {
 	default:
 		return 64 << 20
 	}
+}
+
+// maxDictCap 超过该值时 LZMA2 字典属性无法编码，且内存消耗过大
+const maxDictCap = 1 << 31
+
+// resolveDict 统一解析实际使用的 LZMA2 字典大小：
+// 用户显式指定的 md 优先，其次按 -mx 级别；均不超过固实块大小（若非空）。
+func resolveDict(md int64, level int, unpackSize int64) int {
+	dict := int64(dictForLevel(level))
+	if md > 0 {
+		dict = md
+	}
+	if dict > maxDictCap {
+		dict = maxDictCap
+	}
+	if unpackSize > 0 && int64(dict) > unpackSize && unpackSize >= int64(lzma.MinDictCap) {
+		dict = unpackSize
+	}
+	if dict < int64(lzma.MinDictCap) {
+		dict = int64(lzma.MinDictCap)
+	}
+	return int(dict)
 }
