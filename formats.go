@@ -12,6 +12,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/dsnet/compress/bzip2"
 	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/snappy"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
@@ -40,6 +41,8 @@ var formats = []Format{
 	{Name: "tar.zst", Exts: []string{".tar.zst", ".tzst", ".tar.zstd"}, Write: true, Read: true, Archive: true, Codec: "zst", Desc: "tar + zstd（多线程）"},
 	{Name: "tar.lz4", Exts: []string{".tar.lz4", ".tlz4"}, Write: true, Read: true, Archive: true, Codec: "lz4", Desc: "tar + lz4（多线程）"},
 	{Name: "tar.br", Exts: []string{".tar.br", ".tbr"}, Write: true, Read: true, Archive: true, Codec: "br", Desc: "tar + brotli"},
+	{Name: "tar.lzma", Exts: []string{".tar.lzma", ".tlzma"}, Write: true, Read: true, Archive: true, Codec: "lzma", Desc: "tar + lzma（传统 .lzma 格式）"},
+	{Name: "tar.sz", Exts: []string{".tar.sz"}, Write: true, Read: true, Archive: true, Codec: "sz", Desc: "tar + snappy（帧格式）"},
 	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
 	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
 	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
@@ -47,11 +50,13 @@ var formats = []Format{
 	{Name: "zst", Exts: []string{".zst", ".zstd"}, Write: true, Read: true, Codec: "zst", Desc: "单文件 zstd"},
 	{Name: "lz4", Exts: []string{".lz4"}, Write: true, Read: true, Codec: "lz4", Desc: "单文件 lz4"},
 	{Name: "br", Exts: []string{".br"}, Write: true, Read: true, Codec: "br", Desc: "单文件 brotli"},
+	{Name: "lzma", Exts: []string{".lzma"}, Write: true, Read: true, Codec: "lzma", Desc: "单文件 lzma（传统 .lzma 格式）"},
+	{Name: "sz", Exts: []string{".sz"}, Write: true, Read: true, Codec: "sz", Desc: "单文件 snappy（帧格式）"},
 }
 
 func formatByName(name string) (*Format, error) {
 	n := strings.ToLower(strings.TrimPrefix(name, "."))
-	alias := map[string]string{"tgz": "tar.gz", "tbz2": "tar.bz2", "txz": "tar.xz", "tzst": "tar.zst", "gzip": "gz", "bzip2": "bz2", "zstd": "zst", "brotli": "br", "tar.zstd": "tar.zst"}
+	alias := map[string]string{"tgz": "tar.gz", "tbz2": "tar.bz2", "txz": "tar.xz", "tzst": "tar.zst", "tlzma": "tar.lzma", "gzip": "gz", "bzip2": "bz2", "zstd": "zst", "brotli": "br", "snappy": "sz", "tar.zstd": "tar.zst"}
 	if a, ok := alias[n]; ok {
 		n = a
 	}
@@ -107,12 +112,14 @@ func sniffFormat(path string) (*Format, error) {
 		codec = "zst"
 	case bytes.HasPrefix(head, []byte{0x04, 0x22, 0x4D, 0x18}):
 		codec = "lz4"
+	case bytes.HasPrefix(head, []byte{0xff, 0x06, 0x00, 0x00, 's', 'N', 'a', 'P', 'p', 'Y'}):
+		codec = "sz"
 	case n >= 262 && string(head[257:262]) == "ustar":
 		return formatByName("tar")
 	}
 	if codec == "" {
 		if byExt != nil && byExt.Read {
-			if byExt.Codec == "br" || byExt.Name == "tar" {
+			if byExt.Codec == "br" || byExt.Codec == "lzma" || byExt.Name == "tar" {
 				return byExt, nil
 			}
 		}
@@ -185,6 +192,14 @@ func newDecompressor(codec string, r io.Reader) (io.ReadCloser, error) {
 		return nopCloser{lz4.NewReader(br)}, nil
 	case "br":
 		return nopCloser{brotli.NewReader(br)}, nil
+	case "lzma":
+		zr, err := lzma.NewReader(br)
+		if err != nil {
+			return nil, err
+		}
+		return nopCloser{zr}, nil
+	case "sz":
+		return nopCloser{snappy.NewReader(br)}, nil
 	case "":
 		return nopCloser{br}, nil
 	}
@@ -232,6 +247,11 @@ func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.
 		return zw, nil
 	case "br":
 		return brotli.NewWriterLevel(w, level+2), nil
+	case "lzma":
+		cfg := lzma.WriterConfig{DictCap: resolveDict(md, level, 0)}
+		return cfg.NewWriter(w)
+	case "sz":
+		return snappy.NewWriter(w), nil
 	}
 	return nil, fmt.Errorf("未知压缩算法 %s", codec)
 }

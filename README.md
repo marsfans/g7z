@@ -1,7 +1,7 @@
 # g7z — 类 7-Zip 的多格式压缩工具（Go）
 
 库：cobra + pflag + viper + lipgloss/termenv + pterm；
-压缩：ulikunitz/xz（LZMA2）、klauspost/compress（zstd/gzip/deflate）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）；
+压缩：ulikunitz/xz（LZMA2/LZMA）、klauspost/compress（zstd/gzip/deflate/snappy）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）；
 读取：bodgit/sevenzip（7z）、nwaples/rardecode（rar）；RAR5 写入为内置 rarpack 包（固实 / E8E9 过滤 / AES-256 加密 / 头部加密）。
 
 ## 命令（与 7z 一致）
@@ -30,7 +30,7 @@ g7z h -scrcSHA256 file.iso
 ```
 
 ## 格式
-写入：7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br gz bz2 xz zst lz4 br
+写入：7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz
 读取：以上全部 + rar（RAR4/RAR5、加密、分卷）；7z/zip/rar 读写 AES-256，zip 读 ZipCrypto；
 格式按文件头魔数识别，不依赖扩展名。
 

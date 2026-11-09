@@ -73,7 +73,7 @@ func categoryRank(name string) int {
 	case ".exe", ".dll", ".sys", ".ocx", ".so", ".dylib", ".o", ".obj", ".a",
 		".lib", ".elf", ".bin", ".msi", ".deb", ".rpm":
 		return 1 // 可执行与目标码
-	case ".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".br",
+	case ".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".br", ".lzma", ".sz",
 		".tar", ".jar", ".apk", ".iso", ".dmg", ".png", ".jpg", ".jpeg", ".gif",
 		".webp", ".mp3", ".mp4", ".mkv", ".avi", ".mov", ".pdf":
 		return 3 // 已压缩/富媒体：再去重收益低，放后面
