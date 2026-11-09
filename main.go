@@ -189,7 +189,7 @@ func main() {
 		Short: "g7z — 类 7-Zip 的多格式压缩/解压工具",
 		Long: `g7z — 类 7-Zip 的多格式压缩/解压工具（Go 实现）
 
-写入: 7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz
+写入: 7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz cpio cpio.gz cpio.bz2 cpio.bz3 cpio.xz cpio.zst cpio.lz4 cpio.br cpio.lzma cpio.sz gz bz2 bz3 xz zst lz4 br lzma sz
 读取: 以上全部；rar 支持 4/5；7z/zip/rar 支持 AES-256 加密
 兼容 7z 风格参数: -mx9  -mmt8  -ms=64m  -aoa/-aos/-aou  -p(交互输入密码)  -pPASS  -oDIR  -tzip`,
 		Version:       version,
@@ -285,7 +285,7 @@ func main() {
 				return fmt.Errorf("%s 不支持加密，请用 7z、zip 或 rar", fm.Name)
 			}
 			opt := AddOptions{Format: fm, Level: level, Password: pw, Threads: threads(), Solid: solid, Dict: dict, MHE: viper.GetBool("mhe"), BCJ: viper.GetString("bcj"), Excludes: viper.GetStringSlice("exclude"), Recursive: viper.GetBool("recursive")}
-			files, err := collectInputs(args[1:], opt, strings.HasPrefix(fm.Name, "tar"), out)
+			files, err := collectInputs(args[1:], opt, strings.HasPrefix(fm.Name, "tar") || strings.HasPrefix(fm.Name, "cpio"), out)
 			if err != nil {
 				return err
 			}
@@ -315,7 +315,7 @@ func main() {
 			return nil
 		},
 	}
-	addCmd.Flags().StringP("type", "t", "7z", "归档格式（7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz）")
+	addCmd.Flags().StringP("type", "t", "7z", "归档格式（7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz cpio cpio.gz cpio.bz2 cpio.bz3 cpio.xz cpio.zst cpio.lz4 cpio.br cpio.lzma cpio.sz gz bz2 bz3 xz zst lz4 br lzma sz）")
 	addCmd.Flags().Int("level", 5, "压缩级别 0-9，等同 -mx9")
 	addCmd.Flags().Int("threads", 0, "线程数，0=全部 CPU，等同 -mmt8")
 	addCmd.Flags().String("solid", "64m", "7z 固实块大小，off=不固实，等同 -ms=64m")

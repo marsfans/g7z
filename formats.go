@@ -46,7 +46,19 @@ var formats = []Format{
 	{Name: "tar.br", Exts: []string{".tar.br", ".tbr"}, Write: true, Read: true, Archive: true, Codec: "br", Desc: "tar + brotli"},
 	{Name: "tar.lzma", Exts: []string{".tar.lzma", ".tlzma"}, Write: true, Read: true, Archive: true, Codec: "lzma", Desc: "tar + lzma（传统 .lzma 格式）"},
 	{Name: "tar.sz", Exts: []string{".tar.sz"}, Write: true, Read: true, Archive: true, Codec: "sz", Desc: "tar + snappy（帧格式）"},
+	{Name: "cpio", Exts: []string{".cpio"}, Write: true, Read: true, Archive: true, Desc: "cpio（newc，initramfs / RPM 常用）"},
+	{Name: "cpio.gz", Exts: []string{".cpio.gz"}, Write: true, Read: true, Archive: true, Codec: "gz", Desc: "cpio + gzip"},
+	{Name: "cpio.bz2", Exts: []string{".cpio.bz2"}, Write: true, Read: true, Archive: true, Codec: "bz2", Desc: "cpio + bzip2"},
+	{Name: "cpio.bz3", Exts: []string{".cpio.bz3"}, Write: true, Read: true, Archive: true, Codec: "bz3", Desc: "cpio + bzip3"},
+	{Name: "cpio.xz", Exts: []string{".cpio.xz"}, Write: true, Read: true, Archive: true, Codec: "xz", Desc: "cpio + xz"},
+	{Name: "cpio.zst", Exts: []string{".cpio.zst"}, Write: true, Read: true, Archive: true, Codec: "zst", Desc: "cpio + zstd"},
+	{Name: "cpio.lz4", Exts: []string{".cpio.lz4"}, Write: true, Read: true, Archive: true, Codec: "lz4", Desc: "cpio + lz4"},
+	{Name: "cpio.br", Exts: []string{".cpio.br"}, Write: true, Read: true, Archive: true, Codec: "br", Desc: "cpio + brotli"},
+	{Name: "cpio.lzma", Exts: []string{".cpio.lzma"}, Write: true, Read: true, Archive: true, Codec: "lzma", Desc: "cpio + lzma"},
+	{Name: "cpio.sz", Exts: []string{".cpio.sz"}, Write: true, Read: true, Archive: true, Codec: "sz", Desc: "cpio + snappy"},
 	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
+	{Name: "ar", Exts: []string{".ar", ".a"}, Read: true, Archive: true, Desc: "ar 归档（只读）"},
+	{Name: "deb", Exts: []string{".deb"}, Read: true, Archive: true, Desc: "Debian 软件包（ar 容器，只读，成员可再解开）"},
 	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
 	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
 	{Name: "bz3", Exts: []string{".bz3"}, Write: true, Read: true, Codec: "bz3", Desc: "单文件 bzip3（内置纯 Go 移植）"},
@@ -106,6 +118,13 @@ func sniffFormat(path string) (*Format, error) {
 		return formatByName("zip")
 	case bytes.HasPrefix(head, []byte("Rar!\x1a\x07")):
 		return formatByName("rar")
+	case bytes.HasPrefix(head, []byte("070701")), bytes.HasPrefix(head, []byte("070702")):
+		return formatByName("cpio")
+	case bytes.HasPrefix(head, []byte("!<arch>\n")):
+		if byExt != nil && byExt.Name == "deb" {
+			return formatByName("deb")
+		}
+		return formatByName("ar")
 	case bytes.HasPrefix(head, []byte{0x1f, 0x8b}):
 		codec = "gz"
 	case bytes.HasPrefix(head, []byte("BZh")):
@@ -146,6 +165,9 @@ func sniffFormat(path string) (*Format, error) {
 		m, _ := io.ReadFull(rc, inner)
 		if m >= 262 && string(inner[257:262]) == "ustar" {
 			return formatByName("tar." + codec)
+		}
+		if m >= 6 && (string(inner[:6]) == "070701" || string(inner[:6]) == "070702") {
+			return formatByName("cpio." + codec)
 		}
 	}
 	if byExt != nil && byExt.Archive && byExt.Codec == codec {

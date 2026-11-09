@@ -1,7 +1,7 @@
 # g7z — 类 7-Zip 的多格式压缩工具（Go）
 
 库：cobra + pflag + viper + lipgloss/termenv + pterm；
-压缩：ulikunitz/xz（LZMA2/LZMA）、klauspost/compress（zstd/gzip/deflate/snappy）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）、内置 bz3 子包（bzip3 纯 Go 移植，LGPLv3，产物与官方逐字节一致）；
+压缩：ulikunitz/xz（LZMA2/LZMA）、klauspost/compress（zstd/gzip/deflate/snappy）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）、内置 bz3 子包（bzip3 纯 Go 移植，LGPLv3，产物与官方逐字节一致）、内置 cpio 子包（newc 读写 + crc 只读）；
 读取：bodgit/sevenzip（7z）、nwaples/rardecode（rar）；RAR5 写入为内置 rarpack 包（固实 / E8E9 过滤 / AES-256 加密 / 头部加密）。
 
 ## 命令（与 7z 一致）
@@ -30,7 +30,7 @@ g7z h -scrcSHA256 file.iso
 ```
 
 ## 格式
-写入：7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz
+写入：7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz cpio cpio.gz cpio.bz2 cpio.bz3 cpio.xz cpio.zst cpio.lz4 cpio.br cpio.lzma cpio.sz gz bz2 bz3 xz zst lz4 br lzma sz
 读取：以上全部 + rar（RAR4/RAR5、加密、分卷）；7z/zip/rar 读写 AES-256，zip 读 ZipCrypto；
 格式按文件头魔数识别，不依赖扩展名。
 

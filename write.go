@@ -35,7 +35,7 @@ type AddOptions struct {
 	Threads   int
 	Solid     int64
 	Dict      int64
-	MHE       bool  // -mhe 头部加密
+	MHE       bool   // -mhe 头部加密
 	BCJ       string // on/off/auto // LZMA2 字典大小覆盖（-md / --md），0 = 按级别
 	Excludes  []string
 	Recursive bool
@@ -162,6 +162,8 @@ func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progres
 		err = writeZip(tmpOut, files, opt, prog)
 	case fm.Name == "rar":
 		err = writeRar(tmpOut, files, opt, prog)
+	case strings.HasPrefix(fm.Name, "cpio"):
+		err = writeCpio(tmpOut, files, fm.Codec, opt, prog)
 	case fm.Archive: // tar.*
 		err = writeTar(tmpOut, files, fm.Codec, opt, prog)
 	default:

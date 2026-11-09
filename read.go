@@ -69,6 +69,10 @@ func walkArchive(path string, fm *Format, password string, fn WalkFunc) error {
 		return walkZip(path, password, fn)
 	case fm.Name == "rar":
 		return walkRar(path, password, fn)
+	case fm.Name == "ar" || fm.Name == "deb":
+		return walkAr(path, fn)
+	case strings.HasPrefix(fm.Name, "cpio"):
+		return walkCpio(path, fm.Codec, fn)
 	case fm.Archive:
 		return walkTar(path, fm.Codec, fn)
 	default:

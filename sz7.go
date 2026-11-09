@@ -25,7 +25,7 @@ import (
 )
 
 type SZOptions struct {
-	Level      int   // 0 = 仅存储
+	Level      int // 0 = 仅存储
 	Password   string
 	SolidBlock int64 // 每个固实块的最大原始字节数
 	Threads    int
@@ -331,9 +331,9 @@ func encode7zHeader(hdr []byte, key []byte, packTotal int64) ([]byte, []byte, er
 	// packed 数据物理位置 = 头记录起点 + 头记录前缀长度，packPos 是相对
 	// pack 区起点（签名头之后）的偏移。前缀长度本身依赖 packPos 的变长
 	// 编码长度，无需不动点迭代。
-	rest := &hbuf{}           // kUnpackInfo 及之后
-	rest.WriteByte(0x07)      // kUnpackInfo
-	rest.WriteByte(0x0B)      // kFolder
+	rest := &hbuf{}      // kUnpackInfo 及之后
+	rest.WriteByte(0x07) // kUnpackInfo
+	rest.WriteByte(0x0B) // kFolder
 	rest.num(1)
 	rest.WriteByte(0x00) // external
 	rest.num(2)          // 两个 coder
@@ -351,11 +351,11 @@ func encode7zHeader(hdr []byte, key []byte, packTotal int64) ([]byte, []byte, er
 	// bind pair: coder0 输出 -> coder1 输入
 	rest.num(1)
 	rest.num(0)
-	rest.WriteByte(0x0C) // kCodersUnpackSize
-	rest.num(uint64(len(raw)))  // coder0（AES）输出 = LZMA2 流大小
-	rest.num(uint64(len(hdr)))  // coder1（LZMA2）输出 = 明文头部大小
-	rest.WriteByte(0x0A) // kCRC
-	rest.WriteByte(0x01) // all defined
+	rest.WriteByte(0x0C)       // kCodersUnpackSize
+	rest.num(uint64(len(raw))) // coder0（AES）输出 = LZMA2 流大小
+	rest.num(uint64(len(hdr))) // coder1（LZMA2）输出 = 明文头部大小
+	rest.WriteByte(0x0A)       // kCRC
+	rest.WriteByte(0x01)       // all defined
 	var crcB [4]byte
 	binary.LittleEndian.PutUint32(crcB[:], crc32.ChecksumIEEE(hdr))
 	rest.Write(crcB[:])
