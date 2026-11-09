@@ -2,6 +2,7 @@ package bz3
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,48 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Errorf("big.bin multi-block round trip mismatch")
+	}
+}
+
+// TestParallelDeterministic checks that the encoded bytes do not
+// depend on the worker count and that the parallel reader restores the
+// input, across several block sizes.
+func TestParallelDeterministic(t *testing.T) {
+	data, err := os.ReadFile("testdata/big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bs := range []int{MinBlockSize, 1 << 20} {
+		var reference []byte
+		for _, workers := range []int{1, 2, 8} {
+			var buf bytes.Buffer
+			wr, err := NewWriterWorkers(&buf, bs, workers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := wr.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if err := wr.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if reference == nil {
+				reference = buf.Bytes()
+			} else if !bytes.Equal(buf.Bytes(), reference) {
+				t.Fatalf("bs=%d workers=%d: output differs from workers=1", bs, workers)
+			}
+			rd, err := NewReaderWorkers(bytes.NewReader(reference), workers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(rd)
+			if err != nil {
+				t.Fatalf("bs=%d workers=%d: read: %v", bs, workers, err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("bs=%d workers=%d: decoded mismatch", bs, workers)
+			}
+		}
 	}
 }
 

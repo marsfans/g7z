@@ -266,7 +266,7 @@ func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.
 		if md >= bz3pkg.MinBlockSize && md <= bz3pkg.MaxBlockSize {
 			bs = int(md)
 		}
-		return bz3pkg.NewWriter(w, bs)
+		return bz3pkg.NewWriterWorkers(w, bs, threads)
 	}
 	return nil, fmt.Errorf("未知压缩算法 %s", codec)
 }
