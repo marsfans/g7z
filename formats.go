@@ -293,18 +293,28 @@ func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.
 	return nil, fmt.Errorf("未知压缩算法 %s", codec)
 }
 
-// dictForLevel 与 7-Zip 官方 -mx 级别的 LZMA2 字典大小一致：
-// 1:64k 3:1m 5:16m 7:32m 9:64m（中间级别取相邻档）
+// 注：ulikunitz 的 BinaryTree 匹配器未采用——2026-11-10 实测
+// 在高重复文本上病态退化（16MiB 语料 115 秒未压完，HashTable4
+// 同数据 1.3 秒），不可作默认。压缩率差距主要靠字典对齐弥补。
+//
+// dictForLevel 与 7-Zip 官方 -mx 级别的 LZMA2 字典大小一致
+// （2026-11-10 对官方 7zz 25.01 逐级实测：1:256k 3:4m 5:32m
+// 7:48m 9:64m，偶数级别取插值；官方在内存受限环境会把大字典
+// 压到 48m，本地表按其标称值）。
 func dictForLevel(level int) int {
 	switch {
 	case level <= 1:
-		return 1 << 16
-	case level <= 3:
+		return 1 << 18
+	case level == 2:
 		return 1 << 20
-	case level <= 5:
+	case level <= 3:
+		return 4 << 20
+	case level == 4:
 		return 16 << 20
-	case level <= 7:
+	case level <= 5:
 		return 32 << 20
+	case level <= 7:
+		return 48 << 20
 	default:
 		return 64 << 20
 	}
