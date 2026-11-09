@@ -160,6 +160,8 @@ func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progres
 		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads, Dict: opt.Dict, HeaderEnc: opt.MHE, BCJ: opt.BCJ}, prog)
 	case fm.Name == "zip":
 		err = writeZip(tmpOut, files, opt, prog)
+	case fm.Name == "rar":
+		err = writeRar(tmpOut, files, opt, prog)
 	case fm.Archive: // tar.*
 		err = writeTar(tmpOut, files, fm.Codec, opt, prog)
 	default:

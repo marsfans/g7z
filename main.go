@@ -281,8 +281,8 @@ func main() {
 			if err != nil {
 				return err
 			}
-			if pw != "" && fm.Name != "7z" && fm.Name != "zip" {
-				return fmt.Errorf("%s 不支持加密，请用 7z 或 zip", fm.Name)
+			if pw != "" && fm.Name != "7z" && fm.Name != "zip" && fm.Name != "rar" {
+				return fmt.Errorf("%s 不支持加密，请用 7z、zip 或 rar", fm.Name)
 			}
 			opt := AddOptions{Format: fm, Level: level, Password: pw, Threads: threads(), Solid: solid, Dict: dict, MHE: viper.GetBool("mhe"), BCJ: viper.GetString("bcj"), Excludes: viper.GetStringSlice("exclude"), Recursive: viper.GetBool("recursive")}
 			files, err := collectInputs(args[1:], opt, strings.HasPrefix(fm.Name, "tar"), out)
@@ -320,7 +320,7 @@ func main() {
 	addCmd.Flags().Int("threads", 0, "线程数，0=全部 CPU，等同 -mmt8")
 	addCmd.Flags().String("solid", "64m", "7z 固实块大小，off=不固实，等同 -ms=64m")
 	addCmd.Flags().String("md", "", "LZMA2 字典大小（7z/xz），如 64m、256m，覆盖 -mx 默认值，等同 -md=64m")
-	addCmd.Flags().Bool("mhe", false, "加密头部（文件名列表），等同 -mhe，仅 7z 且需密码")
+	addCmd.Flags().Bool("mhe", false, "加密头部（文件名列表），等同 -mhe，7z / rar 且需密码")
 	addCmd.Flags().String("bcj", "off", "x86 BCJ 过滤器（可执行文件提速明显）: off/on/auto，on=所有固实块启用，auto=代码类文件占比≥50%时启用")
 	addCmd.Flags().StringP("password", "p", "", "加密密码（7z/zip，AES-256）；单独 -p 交互输入")
 	addCmd.Flags().Bool("ask-password", false, "交互输入密码")

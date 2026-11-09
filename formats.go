@@ -40,7 +40,7 @@ var formats = []Format{
 	{Name: "tar.zst", Exts: []string{".tar.zst", ".tzst", ".tar.zstd"}, Write: true, Read: true, Archive: true, Codec: "zst", Desc: "tar + zstd（多线程）"},
 	{Name: "tar.lz4", Exts: []string{".tar.lz4", ".tlz4"}, Write: true, Read: true, Archive: true, Codec: "lz4", Desc: "tar + lz4（多线程）"},
 	{Name: "tar.br", Exts: []string{".tar.br", ".tbr"}, Write: true, Read: true, Archive: true, Codec: "br", Desc: "tar + brotli"},
-	{Name: "rar", Exts: []string{".rar"}, Read: true, Archive: true, Desc: "RAR4 / RAR5，含分卷（只读）", Password: "读"},
+	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
 	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
 	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
 	{Name: "xz", Exts: []string{".xz"}, Write: true, Read: true, Codec: "xz", Desc: "单文件 xz"},
