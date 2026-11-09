@@ -1,0 +1,1541 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/andybalholm/brotli"
+	"github.com/dsnet/compress/bzip2"
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/snappy"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
+	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
+)
+
+// Format 描述一种压缩/归档格式
+type Format struct {
+	Name     string   // 规范名，如 7z / zip / tar.gz / gz
+	Exts     []string // 识别用扩展名
+	Write    bool
+	Read     bool
+	Archive  bool   // 多文件归档（否则为单文件压缩流）
+	Codec    string // tar.* / 单文件流 使用的压缩算法
+	Desc     string
+	Password string // 加密支持说明
+}
+
+var formats = []Format{
+	{Name: "7z", Exts: []string{".7z"}, Write: true, Read: true, Archive: true, Desc: "LZMA2 固实压缩，多线程分块", Password: "读写 AES-256"},
+	{Name: "zip", Exts: []string{".zip", ".jar", ".apk", ".docx", ".xlsx", ".pptx", ".epub", ".cbz"}, Write: true, Read: true, Archive: true, Desc: "Deflate（读取另支持 zstd/xz）", Password: "读写 AES-256，读 ZipCrypto"},
+	{Name: "tar", Exts: []string{".tar"}, Write: true, Read: true, Archive: true, Desc: "不压缩打包，保留权限与符号链接"},
+	{Name: "tar.gz", Exts: []string{".tar.gz", ".tgz"}, Write: true, Read: true, Archive: true, Codec: "gz", Desc: "tar + gzip"},
+	{Name: "tar.bz2", Exts: []string{".tar.bz2", ".tbz2", ".tbz"}, Write: true, Read: true, Archive: true, Codec: "bz2", Desc: "tar + bzip2"},
+	{Name: "tar.xz", Exts: []string{".tar.xz", ".txz"}, Write: true, Read: true, Archive: true, Codec: "xz", Desc: "tar + xz (LZMA2)"},
+	{Name: "tar.zst", Exts: []string{".tar.zst", ".tzst", ".tar.zstd"}, Write: true, Read: true, Archive: true, Codec: "zst", Desc: "tar + zstd（多线程）"},
+	{Name: "tar.lz4", Exts: []string{".tar.lz4", ".tlz4"}, Write: true, Read: true, Archive: true, Codec: "lz4", Desc: "tar + lz4（多线程）"},
+	{Name: "tar.br", Exts: []string{".tar.br", ".tbr"}, Write: true, Read: true, Archive: true, Codec: "br", Desc: "tar + brotli"},
+	{Name: "tar.lzma", Exts: []string{".tar.lzma", ".tlzma"}, Write: true, Read: true, Archive: true, Codec: "lzma", Desc: "tar + lzma（传统 .lzma 格式）"},
+	{Name: "tar.sz", Exts: []string{".tar.sz"}, Write: true, Read: true, Archive: true, Codec: "sz", Desc: "tar + snappy（帧格式）"},
+	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
+	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
+	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
+	{Name: "xz", Exts: []string{".xz"}, Write: true, Read: true, Codec: "xz", Desc: "单文件 xz"},
+	{Name: "zst", Exts: []string{".zst", ".zstd"}, Write: true, Read: true, Codec: "zst", Desc: "单文件 zstd"},
+	{Name: "lz4", Exts: []string{".lz4"}, Write: true, Read: true, Codec: "lz4", Desc: "单文件 lz4"},
+	{Name: "br", Exts: []string{".br"}, Write: true, Read: true, Codec: "br", Desc: "单文件 brotli"},
+	{Name: "lzma", Exts: []string{".lzma"}, Write: true, Read: true, Codec: "lzma", Desc: "单文件 lzma（传统 .lzma 格式）"},
+	{Name: "sz", Exts: []string{".sz"}, Write: true, Read: true, Codec: "sz", Desc: "单文件 snappy（帧格式）"},
+}
+
+func formatByName(name string) (*Format, error) {
+	n := strings.ToLower(strings.TrimPrefix(name, "."))
+	alias := map[string]string{"tgz": "tar.gz", "tbz2": "tar.bz2", "txz": "tar.xz", "tzst": "tar.zst", "tlzma": "tar.lzma", "gzip": "gz", "bzip2": "bz2", "zstd": "zst", "brotli": "br", "snappy": "sz", "tar.zstd": "tar.zst"}
+	if a, ok := alias[n]; ok {
+		n = a
+	}
+	for i := range formats {
+		if formats[i].Name == n {
+			return &formats[i], nil
+		}
+	}
+	return nil, fmt.Errorf("不支持的格式: %s（用 g7z i 查看支持列表）", name)
+}
+
+// formatByExt 按文件名推断格式，优先匹配最长扩展名
+func formatByExt(path string) *Format {
+	lower := strings.ToLower(filepath.Base(path))
+	var best *Format
+	bestLen := 0
+	for i := range formats {
+		for _, e := range formats[i].Exts {
+			if strings.HasSuffix(lower, e) && len(e) > bestLen {
+				best, bestLen = &formats[i], len(e)
+			}
+		}
+	}
+	return best
+}
+
+// sniffFormat 按文件头魔数识别，失败回退扩展名
+func sniffFormat(path string) (*Format, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	byExt := formatByExt(path)
+	codec := ""
+	switch {
+	case bytes.HasPrefix(head, []byte{'7', 'z', 0xBC, 0xAF, 0x27, 0x1C}):
+		return formatByName("7z")
+	case bytes.HasPrefix(head, []byte("PK\x03\x04")), bytes.HasPrefix(head, []byte("PK\x05\x06")), bytes.HasPrefix(head, []byte("PK\x07\x08")):
+		return formatByName("zip")
+	case bytes.HasPrefix(head, []byte("Rar!\x1a\x07")):
+		return formatByName("rar")
+	case bytes.HasPrefix(head, []byte{0x1f, 0x8b}):
+		codec = "gz"
+	case bytes.HasPrefix(head, []byte("BZh")):
+		codec = "bz2"
+	case bytes.HasPrefix(head, []byte{0xFD, '7', 'z', 'X', 'Z', 0x00}):
+		codec = "xz"
+	case bytes.HasPrefix(head, []byte{0x28, 0xB5, 0x2F, 0xFD}):
+		codec = "zst"
+	case bytes.HasPrefix(head, []byte{0x04, 0x22, 0x4D, 0x18}):
+		codec = "lz4"
+	case bytes.HasPrefix(head, []byte{0xff, 0x06, 0x00, 0x00, 's', 'N', 'a', 'P', 'p', 'Y'}):
+		codec = "sz"
+	case n >= 262 && string(head[257:262]) == "ustar":
+		return formatByName("tar")
+	}
+	if codec == "" {
+		if byExt != nil && byExt.Read {
+			if byExt.Codec == "br" || byExt.Codec == "lzma" || byExt.Name == "tar" {
+				return byExt, nil
+			}
+		}
+		// 自解压 7z（exe 前缀）等：扫描签名
+		if byExt == nil || byExt.Name == "7z" {
+			return formatByName("7z")
+		}
+		return nil, fmt.Errorf("无法识别的归档格式: %s", path)
+	}
+	// 压缩流：解压一段看看里面是不是 tar
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	rc, err := newDecompressor(codec, f)
+	if err == nil {
+		defer rc.Close()
+		inner := make([]byte, 512)
+		m, _ := io.ReadFull(rc, inner)
+		if m >= 262 && string(inner[257:262]) == "ustar" {
+			return formatByName("tar." + codec)
+		}
+	}
+	if byExt != nil && byExt.Archive && byExt.Codec == codec {
+		return byExt, nil
+	}
+	return formatByName(codec)
+}
+
+// ---------- 压缩/解压流 ----------
+
+type nopCloser struct{ io.Reader }
+
+func (nopCloser) Close() error { return nil }
+
+type funcCloser struct {
+	io.Reader
+	close func() error
+}
+
+func (f funcCloser) Close() error { return f.close() }
+
+func newDecompressor(codec string, r io.Reader) (io.ReadCloser, error) {
+	br := bufio.NewReaderSize(r, 1<<20)
+	switch codec {
+	case "gz":
+		zr, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, err
+		}
+		return zr, nil
+	case "bz2":
+		zr, err := bzip2.NewReader(br, nil)
+		if err != nil {
+			return nil, err
+		}
+		return zr, nil
+	case "xz":
+		zr, err := xz.NewReader(br)
+		if err != nil {
+			return nil, err
+		}
+		return nopCloser{zr}, nil
+	case "zst":
+		zr, err := zstd.NewReader(br, zstd.WithDecoderConcurrency(0))
+		if err != nil {
+			return nil, err
+		}
+		return funcCloser{zr, func() error { zr.Close(); return nil }}, nil
+	case "lz4":
+		return nopCloser{lz4.NewReader(br)}, nil
+	case "br":
+		return nopCloser{brotli.NewReader(br)}, nil
+	case "lzma":
+		zr, err := lzma.NewReader(br)
+		if err != nil {
+			return nil, err
+		}
+		return nopCloser{zr}, nil
+	case "sz":
+		return nopCloser{snappy.NewReader(br)}, nil
+	case "":
+		return nopCloser{br}, nil
+	}
+	return nil, fmt.Errorf("未知压缩算法 %s", codec)
+}
+
+// newCompressor level 取 0-9（7z 的 -mx 语义），threads 为线程数
+func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.WriteCloser, error) {
+	if level < 1 {
+		level = 1
+	}
+	if level > 9 {
+		level = 9
+	}
+	switch codec {
+	case "gz":
+		return gzip.NewWriterLevel(w, level)
+	case "bz2":
+		return bzip2.NewWriter(w, &bzip2.WriterConfig{Level: level})
+	case "xz":
+		cfg := xz.WriterConfig{DictCap: resolveDict(md, level, 0)}
+		return cfg.NewWriter(w)
+	case "zst":
+		lv := zstd.SpeedDefault
+		switch {
+		case level <= 2:
+			lv = zstd.SpeedFastest
+		case level <= 5:
+			lv = zstd.SpeedDefault
+		case level <= 7:
+			lv = zstd.SpeedBetterCompression
+		default:
+			lv = zstd.SpeedBestCompression
+		}
+		return zstd.NewWriter(w, zstd.WithEncoderLevel(lv), zstd.WithEncoderConcurrency(threads))
+	case "lz4":
+		zw := lz4.NewWriter(w)
+		lv := lz4.Fast
+		if level >= 3 {
+			lv = lz4.CompressionLevel(1 << (8 + level))
+		}
+		if err := zw.Apply(lz4.CompressionLevelOption(lv), lz4.ConcurrencyOption(threads)); err != nil {
+			return nil, err
+		}
+		return zw, nil
+	case "br":
+		return brotli.NewWriterLevel(w, level+2), nil
+	case "lzma":
+		cfg := lzma.WriterConfig{DictCap: resolveDict(md, level, 0)}
+		return cfg.NewWriter(w)
+	case "sz":
+		return snappy.NewWriter(w), nil
+	}
+	return nil, fmt.Errorf("未知压缩算法 %s", codec)
+}
+
+// dictForLevel 与 7-Zip 官方 -mx 级别的 LZMA2 字典大小一致：
+// 1:64k 3:1m 5:16m 7:32m 9:64m（中间级别取相邻档）
+func dictForLevel(level int) int {
+	switch {
+	case level <= 1:
+		return 1 << 16
+	case level <= 3:
+		return 1 << 20
+	case level <= 5:
+		return 16 << 20
+	case level <= 7:
+		return 32 << 20
+	default:
+		return 64 << 20
+	}
+}
+
+// maxDictCap 超过该值时 LZMA2 字典属性无法编码，且内存消耗过大
+const maxDictCap = 1 << 31
+
+// resolveDict 统一解析实际使用的 LZMA2 字典大小：
+// 用户显式指定的 md 优先，其次按 -mx 级别；均不超过固实块大小（若非空）。
+func resolveDict(md int64, level int, unpackSize int64) int {
+	dict := int64(dictForLevel(level))
+	if md > 0 {
+		dict = md
+	}
+	if dict > maxDictCap {
+		dict = maxDictCap
+	}
+	if unpackSize > 0 && int64(dict) > unpackSize && unpackSize >= int64(lzma.MinDictCap) {
+		dict = unpackSize
+	}
+	if dict < int64(lzma.MinDictCap) {
+		dict = int64(lzma.MinDictCap)
+	}
+	return int(dict)
+}
+package main
+
+import (
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"hash"
+	"hash/crc32"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pterm/pterm"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
+)
+
+var version = "1.0.0"
+
+const sampleConfig = `# g7z 配置文件（命令行参数优先于此文件，环境变量 G7Z_<KEY> 也可覆盖）
+# 默认归档格式（输出文件没有可识别扩展名时使用）
+type: 7z
+# 压缩级别 0-9（0=仅存储）
+level: 5
+# 线程数，0 表示使用全部 CPU
+threads: 0
+# 7z 固实块大小，如 16m / 64m / 1g，0 或 off 表示每个文件单独成块
+solid: 64m
+# 解压遇到同名文件：ask 询问 / a 覆盖 / s 跳过 / u 自动重命名
+overwrite: ask
+# 压缩时排除的文件（通配符）
+exclude:
+  - "*.g7ztmp"
+# 关闭彩色输出
+no-color: false
+`
+
+// 7z 风格参数改写：-mx9 -mmt4 -ms=64m -aoa -p
+func rewriteArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	re := map[*regexp.Regexp]string{
+		regexp.MustCompile(`^-mx=?(\d)$`):          "--level=$1",
+		regexp.MustCompile(`^-md=?([\w]+)$`):       "--md=$1",
+		regexp.MustCompile(`^-mhe$`):              "--mhe",
+		regexp.MustCompile(`^-bcj=?(on|off|auto)$`): "--bcj=$1",
+		regexp.MustCompile(`^-mmt=?(\d+|on|off)$`): "--threads=$1",
+		regexp.MustCompile(`^-ms=?([\w]+)$`):       "--solid=$1",
+		regexp.MustCompile(`^-ao([asu])$`):         "--overwrite=$1",
+		regexp.MustCompile(`^-sccrc(\w+)$`):        "--algo=$1",
+		regexp.MustCompile(`^-scrc(\w+)$`):         "--algo=$1",
+	}
+	afterDD := false
+	for _, a := range args {
+		if a == "--" {
+			afterDD = true
+		}
+		if !afterDD {
+			if a == "-p" {
+				out = append(out, "--ask-password")
+				continue
+			}
+			done := false
+			for r, rep := range re {
+				if r.MatchString(a) {
+					v := r.ReplaceAllString(a, rep)
+					if strings.HasPrefix(v, "--threads=") {
+						// 仅 threads 的 on/off 语义需要换算
+						v = strings.Replace(v, "=on", "=0", 1)
+						v = strings.Replace(v, "=off", "=1", 1)
+					}
+					out = append(out, v)
+					done = true
+					break
+				}
+			}
+			if done {
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func parseSize(s string) (int64, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", "off", "0", "false":
+		return 1, nil // 每个文件单独成块
+	case "on", "true", "e":
+		return 1 << 62, nil
+	}
+	mul := int64(1)
+	switch s[len(s)-1] {
+	case 'k':
+		mul = 1 << 10
+	case 'm':
+		mul = 1 << 20
+	case 'g':
+		mul = 1 << 30
+	case 'b':
+		mul = 1
+	}
+	if mul != 1 || s[len(s)-1] == 'b' {
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("无效大小: %s", s)
+	}
+	return n * mul, nil
+}
+
+func threads() int {
+	n := viper.GetInt("threads")
+	if n <= 0 {
+		n = runtime.NumCPU()
+	}
+	return n
+}
+
+func getPassword(cmd *cobra.Command, prompt string, confirm bool) (string, error) {
+	pw := viper.GetString("password")
+	if pw == "" {
+		if ask, _ := cmd.Flags().GetBool("ask-password"); ask {
+			p, err := askPassword(prompt)
+			if err != nil {
+				return "", err
+			}
+			if confirm {
+				p2, err := askPassword("再次输入密码")
+				if err != nil {
+					return "", err
+				}
+				if p != p2 {
+					return "", errors.New("两次输入的密码不一致")
+				}
+			}
+			pw = p
+		}
+	}
+	return pw, nil
+}
+
+// openArchiveInteractive 识别格式并在需要时提示密码
+func prepareRead(cmd *cobra.Command, archive string) (*Format, string, error) {
+	if _, err := os.Stat(archive); err != nil {
+		return nil, "", err
+	}
+	fm, err := sniffFormat(archive)
+	if err != nil {
+		return nil, "", err
+	}
+	if t := viper.GetString("type"); t != "" && cmd.Flags().Changed("type") {
+		if fm, err = formatByName(t); err != nil {
+			return nil, "", err
+		}
+	}
+	pw, err := getPassword(cmd, "输入密码", false)
+	if err != nil {
+		return nil, "", err
+	}
+	if pw == "" && needsPassword(archive, fm) {
+		if pw, err = askPassword("归档已加密，输入密码"); err != nil {
+			return nil, "", err
+		}
+	}
+	return fm, pw, nil
+}
+
+func main() {
+	var cfgFile string
+	var noColor bool
+	exitCode := 0
+
+	root := &cobra.Command{
+		Use:   "g7z",
+		Short: "g7z — 类 7-Zip 的多格式压缩/解压工具",
+		Long: `g7z — 类 7-Zip 的多格式压缩/解压工具（Go 实现）
+
+写入: 7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz
+读取: 以上全部；rar 支持 4/5；7z/zip/rar 支持 AES-256 加密
+兼容 7z 风格参数: -mx9  -mmt8  -ms=64m  -aoa/-aos/-aou  -p(交互输入密码)  -pPASS  -oDIR  -tzip`,
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cmd.Flags().VisitAll(func(f *pflag.Flag) { _ = viper.BindPFlag(f.Name, f) })
+			viper.SetEnvPrefix("G7Z")
+			viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+			viper.AutomaticEnv()
+			viper.SetDefault("level", 5)
+			viper.SetDefault("solid", "64m")
+			viper.SetDefault("overwrite", "ask")
+			if cfgFile == "" {
+				cfgFile = os.Getenv("G7Z_CONFIG")
+			}
+			if cfgFile != "" {
+				viper.SetConfigFile(cfgFile)
+			} else {
+				viper.SetConfigName("g7z")
+				viper.SetConfigType("yaml")
+				viper.AddConfigPath(".")
+				if d, err := os.UserConfigDir(); err == nil {
+					viper.AddConfigPath(filepath.Join(d, "g7z"))
+				}
+				if h, err := os.UserHomeDir(); err == nil {
+					viper.AddConfigPath(h)
+					viper.AddConfigPath(filepath.Join(h, ".config", "g7z"))
+				}
+			}
+			if err := viper.ReadInConfig(); err != nil {
+				var nf viper.ConfigFileNotFoundError
+				if !errors.As(err, &nf) && cfgFile != "" {
+					return fmt.Errorf("读取配置失败: %w", err)
+				}
+			}
+			initUI(noColor || viper.GetBool("no-color"))
+			return nil
+		},
+	}
+	root.PersistentFlags().StringVar(&cfgFile, "config", "", "配置文件路径（默认 ./g7z.yaml 或 ~/.config/g7z/g7z.yaml）")
+	root.PersistentFlags().BoolVar(&noColor, "no-color", false, "关闭彩色输出")
+	root.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "安静模式，不显示进度")
+	root.SetVersionTemplate("g7z {{.Version}}\n")
+
+	// ---------- a ----------
+	addCmd := &cobra.Command{
+		Use:     "a <归档> <文件/目录...>",
+		Aliases: []string{"add"},
+		Short:   "压缩：创建归档",
+		Example: "  g7z a backup.7z ./docs ./src -mx9 -p\n  g7z a site.tar.zst /var/www -mmt8\n  g7z a pack.zip *.log -pSecret -x '*.tmp'\n  g7z a big.iso.xz big.iso",
+		Args:    cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := args[0]
+			var fm *Format
+			var err error
+			if cmd.Flags().Changed("type") || formatByExt(out) == nil {
+				if fm, err = formatByName(viper.GetString("type")); err != nil {
+					return err
+				}
+				if formatByExt(out) == nil {
+					out += fm.Exts[0]
+				}
+			} else {
+				fm = formatByExt(out)
+			}
+			if !fm.Write {
+				return fmt.Errorf("%s 格式只支持读取，不能创建", fm.Name)
+			}
+			level := viper.GetInt("level")
+			if level < 0 || level > 9 {
+				return errors.New("压缩级别需在 0-9 之间")
+			}
+			solid, err := parseSize(viper.GetString("solid"))
+			if err != nil {
+				return err
+			}
+			dict, err := parseSize(viper.GetString("md"))
+			if err != nil {
+				return err
+			}
+			if dict < 0 || dict > maxDictCap {
+				return fmt.Errorf("字典大小需在 4k-2g 之间: %s", viper.GetString("md"))
+			}
+			if dict == 1 { // parseSize 的 off/0 哨兵值 = 未指定
+				dict = 0
+			}
+			pw, err := getPassword(cmd, "设置密码", true)
+			if err != nil {
+				return err
+			}
+			if pw != "" && fm.Name != "7z" && fm.Name != "zip" && fm.Name != "rar" {
+				return fmt.Errorf("%s 不支持加密，请用 7z、zip 或 rar", fm.Name)
+			}
+			opt := AddOptions{Format: fm, Level: level, Password: pw, Threads: threads(), Solid: solid, Dict: dict, MHE: viper.GetBool("mhe"), BCJ: viper.GetString("bcj"), Excludes: viper.GetStringSlice("exclude"), Recursive: viper.GetBool("recursive")}
+			files, err := collectInputs(args[1:], opt, strings.HasPrefix(fm.Name, "tar"), out)
+			if err != nil {
+				return err
+			}
+			total, nf, nd := totalSize(files)
+			logInfo("创建 %s [%s]  %d 个文件, %d 个目录, 共 %s  级别 %d  线程 %d", out, fm.Name, nf, nd, humanBytes(total), level, opt.Threads)
+			prog := NewProgress("压缩", total)
+			err = createArchive(out, files, opt, prog)
+			prog.Finish()
+			if err != nil {
+				return err
+			}
+			st, _ := os.Stat(out)
+			el := prog.Elapsed()
+			ratio := "-"
+			if total > 0 {
+				ratio = fmt.Sprintf("%.1f%%", float64(st.Size())*100/float64(total))
+			}
+			enc := "无"
+			if pw != "" {
+				enc = "AES-256"
+			}
+			summary("压缩完成", [][]string{
+				{"归档", out}, {"格式", fm.Name}, {"文件 / 目录", fmt.Sprintf("%d / %d", nf, nd)},
+				{"原始大小", humanBytes(total)}, {"压缩后", humanBytes(st.Size())}, {"压缩率", ratio},
+				{"加密", enc}, {"耗时", el.Round(time.Millisecond).String()}, {"速度", humanBytes(int64(float64(total)/maxf(el.Seconds(), 0.001))) + "/s"},
+			})
+			return nil
+		},
+	}
+	addCmd.Flags().StringP("type", "t", "7z", "归档格式（7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz）")
+	addCmd.Flags().Int("level", 5, "压缩级别 0-9，等同 -mx9")
+	addCmd.Flags().Int("threads", 0, "线程数，0=全部 CPU，等同 -mmt8")
+	addCmd.Flags().String("solid", "64m", "7z 固实块大小，off=不固实，等同 -ms=64m")
+	addCmd.Flags().String("md", "", "LZMA2 字典大小（7z/xz），如 64m、256m，覆盖 -mx 默认值，等同 -md=64m")
+	addCmd.Flags().Bool("mhe", false, "加密头部（文件名列表），等同 -mhe，7z / rar 且需密码")
+	addCmd.Flags().String("bcj", "off", "x86 BCJ 过滤器（可执行文件提速明显）: off/on/auto，on=所有固实块启用，auto=代码类文件占比≥50%时启用")
+	addCmd.Flags().StringP("password", "p", "", "加密密码（7z/zip，AES-256）；单独 -p 交互输入")
+	addCmd.Flags().Bool("ask-password", false, "交互输入密码")
+	addCmd.Flags().StringSliceP("exclude", "x", nil, "排除的文件通配符，可多次使用")
+	addCmd.Flags().BoolP("recursive", "r", true, "递归子目录")
+	_ = addCmd.Flags().MarkHidden("ask-password")
+
+	// ---------- x / e ----------
+	mkExtract := func(use, short string, flat bool, aliases []string) *cobra.Command {
+		c := &cobra.Command{
+			Use:     use + " <归档> [要解压的文件/通配符...]",
+			Aliases: aliases,
+			Short:   short,
+			Args:    cobra.MinimumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				archive := args[0]
+				fm, pw, err := prepareRead(cmd, archive)
+				if err != nil {
+					return err
+				}
+				ow := viper.GetString("overwrite")
+				if y, _ := cmd.Flags().GetBool("yes"); y {
+					ow = "a"
+				}
+				opt := &ExtractOptions{OutDir: viper.GetString("output"), Flat: flat, Overwrite: ow, Filters: args[1:], Password: pw}
+				if opt.OutDir == "" {
+					opt.OutDir = "."
+				}
+				if err := os.MkdirAll(opt.OutDir, 0o755); err != nil {
+					return err
+				}
+				logInfo("解压 %s [%s] → %s", archive, fm.Name, opt.OutDir)
+				prog := NewProgress("解压", archiveTotal(archive, fm, pw, opt.Filters))
+				st, err := runExtract(archive, fm, opt, prog)
+				prog.Finish()
+				if err != nil {
+					if errors.Is(err, errNeedPassword) {
+						return errors.New("归档已加密，请用 -p 指定密码")
+					}
+					return err
+				}
+				el := prog.Elapsed()
+				summary("解压完成", [][]string{
+					{"归档", archive}, {"格式", fm.Name}, {"输出目录", opt.OutDir},
+					{"文件 / 目录", fmt.Sprintf("%d / %d", st.Files, st.Dirs)}, {"跳过", strconv.Itoa(st.Skipped)}, {"错误", strconv.Itoa(st.Errors)},
+					{"大小", humanBytes(st.Bytes)}, {"耗时", el.Round(time.Millisecond).String()}, {"速度", humanBytes(int64(float64(st.Bytes)/maxf(el.Seconds(), 0.001))) + "/s"},
+				})
+				if st.Errors > 0 {
+					exitCode = 2
+				}
+				return nil
+			},
+		}
+		c.Flags().StringP("output", "o", ".", "输出目录，等同 -oDIR")
+		c.Flags().StringP("password", "p", "", "密码；单独 -p 交互输入")
+		c.Flags().Bool("ask-password", false, "交互输入密码")
+		c.Flags().String("overwrite", "ask", "同名文件处理: ask/a/s/u，等同 -aoa -aos -aou")
+		c.Flags().BoolP("yes", "y", false, "全部覆盖，不询问")
+		c.Flags().StringP("type", "t", "", "强制指定格式")
+		_ = c.Flags().MarkHidden("ask-password")
+		return c
+	}
+	xCmd := mkExtract("x", "解压（保留完整路径）", false, []string{"extract"})
+	eCmd := mkExtract("e", "解压到同一目录（不保留路径）", true, nil)
+
+	// ---------- l ----------
+	lCmd := &cobra.Command{
+		Use:     "l <归档>",
+		Aliases: []string{"list"},
+		Short:   "列出归档内容",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			archive := args[0]
+			fm, pw, err := prepareRead(cmd, archive)
+			if err != nil {
+				return err
+			}
+			data := pterm.TableData{{"修改时间", "属性", "大小", "压缩后", "名称"}}
+			var total, packed int64
+			nf, nd := 0, 0
+			err = walkArchive(archive, fm, pw, func(e *Entry, open func() (io.ReadCloser, error)) error {
+				size := e.Size
+				if size < 0 && fm.Archive == false {
+					// 单文件流需要解压才能知道大小
+					if rc, err := open(); err == nil {
+						size, _ = io.Copy(io.Discard, rc)
+						rc.Close()
+					}
+				}
+				attr := e.Mode.String()
+				if e.Encrypted {
+					attr += " *"
+				}
+				ps := "-"
+				if e.Packed >= 0 {
+					ps = humanBytes(e.Packed)
+					packed += e.Packed
+				}
+				ss := humanBytes(size)
+				if e.IsDir {
+					ss = "<DIR>"
+					nd++
+				} else {
+					nf++
+					if size > 0 {
+						total += size
+					}
+				}
+				name := e.Name
+				if e.Link != "" {
+					name += " -> " + e.Link
+				}
+				mt := "-"
+				if !e.ModTime.IsZero() {
+					mt = e.ModTime.Local().Format("2006-01-02 15:04:05")
+				}
+				data = append(data, []string{mt, attr, ss, ps, name})
+				return nil
+			})
+			if err != nil {
+				if errors.Is(err, errNeedPassword) {
+					return errors.New("归档已加密，请用 -p 指定密码")
+				}
+				return err
+			}
+			st, _ := os.Stat(archive)
+			pterm.DefaultSection.WithLevel(2).Printfln("%s  [%s]  %s", archive, fm.Name, humanBytes(st.Size()))
+			_ = pterm.DefaultTable.WithHasHeader().WithRightAlignment(false).WithData(data).WithWriter(os.Stdout).Render()
+			ps := "-"
+			if packed > 0 {
+				ps = humanBytes(packed)
+			}
+			fmt.Printf("\n共 %d 个文件, %d 个目录, 原始 %s, 压缩后 %s\n", nf, nd, humanBytes(total), ps)
+			return nil
+		},
+	}
+	lCmd.Flags().StringP("password", "p", "", "密码")
+	lCmd.Flags().Bool("ask-password", false, "交互输入密码")
+	lCmd.Flags().StringP("type", "t", "", "强制指定格式")
+	_ = lCmd.Flags().MarkHidden("ask-password")
+
+	// ---------- t ----------
+	tCmd := &cobra.Command{
+		Use:     "t <归档> [文件/通配符...]",
+		Aliases: []string{"test"},
+		Short:   "测试归档完整性（CRC 校验）",
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			archive := args[0]
+			fm, pw, err := prepareRead(cmd, archive)
+			if err != nil {
+				return err
+			}
+			opt := &ExtractOptions{Test: true, Filters: args[1:], Password: pw}
+			prog := NewProgress("测试", archiveTotal(archive, fm, pw, opt.Filters))
+			st, err := runExtract(archive, fm, opt, prog)
+			prog.Finish()
+			if err != nil {
+				if errors.Is(err, errNeedPassword) {
+					return errors.New("归档已加密，请用 -p 指定密码")
+				}
+				return err
+			}
+			if st.Errors > 0 {
+				exitCode = 2
+				logErr("%s: %d 个文件出错, %d 个正常", archive, st.Errors, st.Files)
+				return nil
+			}
+			logOK("%s: 全部正常（%d 个文件, %s, %s）", archive, st.Files, humanBytes(st.Bytes), prog.Elapsed().Round(time.Millisecond))
+			return nil
+		},
+	}
+	tCmd.Flags().StringP("password", "p", "", "密码")
+	tCmd.Flags().Bool("ask-password", false, "交互输入密码")
+	tCmd.Flags().StringP("type", "t", "", "强制指定格式")
+	_ = tCmd.Flags().MarkHidden("ask-password")
+
+	// ---------- i ----------
+	iCmd := &cobra.Command{
+		Use:     "i",
+		Aliases: []string{"info", "formats"},
+		Short:   "显示支持的格式",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data := pterm.TableData{{"格式", "扩展名", "压缩", "解压", "加密", "说明"}}
+			yn := func(b bool) string {
+				if b {
+					return pterm.Green("✔")
+				}
+				return pterm.Gray("—")
+			}
+			for _, f := range formats {
+				pw := f.Password
+				if pw == "" {
+					pw = "—"
+				}
+				data = append(data, []string{f.Name, strings.Join(f.Exts, " "), yn(f.Write), yn(f.Read), pw, f.Desc})
+			}
+			pterm.DefaultSection.WithLevel(2).Println("g7z " + version + " 支持的格式")
+			return pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(data).WithWriter(os.Stdout).Render()
+		},
+	}
+
+	// ---------- h ----------
+	hCmd := &cobra.Command{
+		Use:     "h <文件...>",
+		Aliases: []string{"hash"},
+		Short:   "计算文件哈希（crc32 md5 sha1 sha256 sha512）",
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			algo := strings.ToLower(viper.GetString("algo"))
+			newH := map[string]func() hash.Hash{
+				"crc32": func() hash.Hash { return crc32.NewIEEE() }, "md5": md5.New, "sha1": sha1.New, "sha256": sha256.New, "sha512": sha512.New,
+			}[algo]
+			if newH == nil {
+				return fmt.Errorf("不支持的哈希算法 %s", algo)
+			}
+			var paths []string
+			for _, a := range args {
+				m, _ := filepath.Glob(a)
+				if len(m) == 0 {
+					m = []string{a}
+				}
+				for _, p := range m {
+					_ = filepath.Walk(p, func(fp string, info os.FileInfo, err error) error {
+						if err == nil && info.Mode().IsRegular() {
+							paths = append(paths, fp)
+						}
+						return err
+					})
+				}
+			}
+			sort.Strings(paths)
+			var total int64
+			for _, p := range paths {
+				if st, err := os.Stat(p); err == nil {
+					total += st.Size()
+				}
+			}
+			prog := NewProgress(strings.ToUpper(algo), total)
+			type res struct{ sum, path string }
+			var rs []res
+			for _, p := range paths {
+				f, err := os.Open(p)
+				if err != nil {
+					prog.Finish()
+					return err
+				}
+				prog.SetCurrent(p)
+				h := newH()
+				_, err = io.Copy(io.MultiWriter(h, prog), f)
+				f.Close()
+				if err != nil {
+					prog.Finish()
+					return err
+				}
+				rs = append(rs, res{hex.EncodeToString(h.Sum(nil)), filepath.ToSlash(p)})
+			}
+			prog.Finish()
+			for _, r := range rs {
+				fmt.Printf("%s  %s\n", r.sum, r.path)
+			}
+			return nil
+		},
+	}
+	hCmd.Flags().String("algo", "sha256", "哈希算法: crc32 md5 sha1 sha256 sha512（也可 -scrcSHA256）")
+
+	// ---------- config ----------
+	cfgCmd := &cobra.Command{
+		Use:   "config",
+		Short: "查看当前配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			src := viper.ConfigFileUsed()
+			if src == "" {
+				src = "（未找到配置文件，使用默认值）"
+			}
+			data := pterm.TableData{{"键", "值"}}
+			for _, k := range []string{"type", "level", "threads", "solid", "overwrite", "exclude", "no-color"} {
+				v := fmt.Sprint(viper.Get(k))
+				if k == "threads" && viper.GetInt(k) <= 0 {
+					v = fmt.Sprintf("0（自动: %d）", runtime.NumCPU())
+				}
+				if v == "<nil>" || v == "" || v == "[]" {
+					v = "-"
+				}
+				data = append(data, []string{k, v})
+			}
+			pterm.DefaultSection.WithLevel(2).Println("配置来源: " + src)
+			return pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(data).WithWriter(os.Stdout).Render()
+		},
+	}
+	cfgInit := &cobra.Command{
+		Use:   "init [路径]",
+		Short: "生成示例配置文件",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := "g7z.yaml"
+			if len(args) == 1 {
+				p = args[0]
+			} else if d, err := os.UserConfigDir(); err == nil {
+				p = filepath.Join(d, "g7z", "g7z.yaml")
+			}
+			if _, err := os.Stat(p); err == nil {
+				return fmt.Errorf("%s 已存在", p)
+			}
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, []byte(sampleConfig), 0o644); err != nil {
+				return err
+			}
+			logOK("已生成 %s", p)
+			return nil
+		},
+	}
+	cfgCmd.AddCommand(cfgInit)
+
+	root.AddCommand(addCmd, xCmd, eCmd, lCmd, tCmd, iCmd, hCmd, cfgCmd)
+	root.SetArgs(rewriteArgs(os.Args[1:]))
+	if err := root.Execute(); err != nil {
+		if stderrTTY || termOut != nil {
+			logErr("%v", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+		}
+		os.Exit(2)
+	}
+	os.Exit(exitCode)
+}
+package main
+
+import (
+	"archive/tar"
+	stdzip "archive/zip"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/klauspost/compress/flate"
+	"github.com/klauspost/compress/gzip"
+	yzip "github.com/yeka/zip"
+)
+
+// InputFile 待压缩的一个条目
+type InputFile struct {
+	Name    string // 归档内路径（/ 分隔）
+	Path    string // 磁盘路径
+	Size    int64
+	ModTime time.Time
+	Mode    fs.FileMode
+	IsDir   bool
+	Link    string // 符号链接目标（仅 tar 保留）
+}
+
+type AddOptions struct {
+	Format    *Format
+	Level     int
+	Password  string
+	Threads   int
+	Solid     int64
+	Dict      int64
+	MHE       bool  // -mhe 头部加密
+	BCJ       string // on/off/auto // LZMA2 字典大小覆盖（-md / --md），0 = 按级别
+	Excludes  []string
+	Recursive bool
+}
+
+func excluded(name string, pats []string) bool {
+	base := path.Base(name)
+	for _, p := range pats {
+		if ok, _ := path.Match(p, base); ok {
+			return true
+		}
+		if ok, _ := path.Match(p, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// collectInputs 遍历输入路径；目录内容以目录名为前缀存入（与 7z 一致）
+func collectInputs(args []string, opt AddOptions, keepLinks bool, skip string) ([]*InputFile, error) {
+	var out []*InputFile
+	seen := map[string]bool{}
+	skipAbs, _ := filepath.Abs(skip)
+	for _, arg := range args {
+		matches, err := filepath.Glob(arg)
+		if err != nil || len(matches) == 0 {
+			matches = []string{arg}
+		}
+		for _, m := range matches {
+			m = filepath.Clean(m)
+			base := filepath.Dir(m)
+			err := filepath.WalkDir(m, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if abs, _ := filepath.Abs(p); abs == skipAbs || abs == skipAbs+".g7ztmp" {
+					return nil
+				}
+				rel, err := filepath.Rel(base, p)
+				if err != nil || strings.HasPrefix(rel, "..") {
+					rel = filepath.Base(p)
+				}
+				name := filepath.ToSlash(rel)
+				if name == "." || name == "" {
+					return nil
+				}
+				if excluded(name, opt.Excludes) {
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if seen[name] {
+					return nil
+				}
+				seen[name] = true
+				info, err := os.Lstat(p)
+				if err != nil {
+					return err
+				}
+				f := &InputFile{Name: name, Path: p, ModTime: info.ModTime(), Mode: info.Mode()}
+				if info.Mode()&fs.ModeSymlink != 0 {
+					if keepLinks {
+						f.Link, _ = os.Readlink(p)
+						out = append(out, f)
+						return nil
+					}
+					st, err := os.Stat(p)
+					if err != nil || st.IsDir() {
+						logWarn("跳过符号链接 %s", p)
+						return nil
+					}
+					info = st
+					f.Mode = st.Mode()
+				}
+				if info.IsDir() {
+					f.IsDir = true
+					out = append(out, f)
+					if !opt.Recursive && p != m {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if !info.Mode().IsRegular() {
+					return nil
+				}
+				f.Size = info.Size()
+				out = append(out, f)
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("没有找到要压缩的文件")
+	}
+	return out, nil
+}
+
+func totalSize(files []*InputFile) (int64, int, int) {
+	var n int64
+	nf, nd := 0, 0
+	for _, f := range files {
+		if f.IsDir {
+			nd++
+		} else {
+			nf++
+			n += f.Size
+		}
+	}
+	return n, nf, nd
+}
+
+func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progress) error {
+	fm := opt.Format
+	tmpOut := out + ".g7ztmp"
+	var err error
+	switch {
+	case fm.Name == "7z":
+		err = write7z(tmpOut, files, SZOptions{Level: opt.Level, Password: opt.Password, SolidBlock: opt.Solid, Threads: opt.Threads, Dict: opt.Dict, HeaderEnc: opt.MHE, BCJ: opt.BCJ}, prog)
+	case fm.Name == "zip":
+		err = writeZip(tmpOut, files, opt, prog)
+	case fm.Name == "rar":
+		err = writeRar(tmpOut, files, opt, prog)
+	case fm.Archive: // tar.*
+		err = writeTar(tmpOut, files, fm.Codec, opt, prog)
+	default:
+		err = writeSingle(tmpOut, files, fm.Codec, opt, prog)
+	}
+	if err != nil {
+		os.Remove(tmpOut)
+		return err
+	}
+	os.Remove(out)
+	return os.Rename(tmpOut, out)
+}
+
+func copyFile(w io.Writer, f *InputFile, prog *Progress) error {
+	prog.SetCurrent(f.Name)
+	src, err := os.Open(f.Path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	_, err = io.CopyBuffer(w, io.TeeReader(src, prog), make([]byte, 1<<20))
+	return err
+}
+
+func writeZip(out string, files []*InputFile, opt AddOptions, prog *Progress) error {
+	o, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer o.Close()
+	if opt.Password != "" {
+		zw := yzip.NewWriter(o)
+		for _, f := range files {
+			fh := &yzip.FileHeader{Name: f.Name, Method: yzip.Deflate}
+			fh.SetModTime(f.ModTime)
+			fh.SetMode(f.Mode)
+			if f.IsDir {
+				fh.Name += "/"
+				fh.Method = yzip.Store
+				if _, err := zw.CreateHeader(fh); err != nil {
+					return err
+				}
+				continue
+			}
+			if opt.Level == 0 {
+				fh.Method = yzip.Store
+			}
+			fh.SetPassword(opt.Password)
+			fh.SetEncryptionMethod(yzip.AES256Encryption)
+			w, err := zw.CreateHeader(fh)
+			if err != nil {
+				return err
+			}
+			if err := copyFile(w, f, prog); err != nil {
+				return err
+			}
+		}
+		if err := zw.Close(); err != nil {
+			return err
+		}
+		return o.Close()
+	}
+	zw := stdzip.NewWriter(o)
+	lvl := opt.Level
+	zw.RegisterCompressor(stdzip.Deflate, func(w io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(w, lvl)
+	})
+	for _, f := range files {
+		fh, err := stdzip.FileInfoHeader(fileInfoOf(f))
+		if err != nil {
+			return err
+		}
+		fh.Name = f.Name
+		if f.IsDir {
+			fh.Name += "/"
+			fh.Method = stdzip.Store
+		} else if opt.Level == 0 {
+			fh.Method = stdzip.Store
+		} else {
+			fh.Method = stdzip.Deflate
+		}
+		fh.Modified = f.ModTime
+		w, err := zw.CreateHeader(fh)
+		if err != nil {
+			return err
+		}
+		if !f.IsDir {
+			if err := copyFile(w, f, prog); err != nil {
+				return err
+			}
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	return o.Close()
+}
+
+type inputInfo struct{ f *InputFile }
+
+func (i inputInfo) Name() string       { return path.Base(i.f.Name) }
+func (i inputInfo) Size() int64        { return i.f.Size }
+func (i inputInfo) Mode() fs.FileMode  { return i.f.Mode }
+func (i inputInfo) ModTime() time.Time { return i.f.ModTime }
+func (i inputInfo) IsDir() bool        { return i.f.IsDir }
+func (i inputInfo) Sys() any           { return nil }
+
+func fileInfoOf(f *InputFile) fs.FileInfo { return inputInfo{f} }
+
+func writeTar(out string, files []*InputFile, codec string, opt AddOptions, prog *Progress) error {
+	o, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer o.Close()
+	var w io.Writer = o
+	var cw io.WriteCloser
+	if codec != "" {
+		cw, err = newCompressor(codec, o, opt.Level, opt.Threads, opt.Dict)
+		if err != nil {
+			return err
+		}
+		w = cw
+	}
+	tw := tar.NewWriter(w)
+	for _, f := range files {
+		hdr, err := tar.FileInfoHeader(fileInfoOf(f), f.Link)
+		if err != nil {
+			return err
+		}
+		hdr.Name = f.Name
+		if f.IsDir {
+			hdr.Name += "/"
+		}
+		hdr.Format = tar.FormatPAX
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			if err := copyFile(tw, f, prog); err != nil {
+				return err
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if cw != nil {
+		if err := cw.Close(); err != nil {
+			return err
+		}
+	}
+	return o.Close()
+}
+
+func writeSingle(out string, files []*InputFile, codec string, opt AddOptions, prog *Progress) error {
+	var src *InputFile
+	for _, f := range files {
+		if !f.IsDir {
+			if src != nil {
+				return fmt.Errorf("%s 只能压缩单个文件，多个文件请用 tar.%s 或 7z/zip", codec, codec)
+			}
+			src = f
+		}
+	}
+	if src == nil {
+		return fmt.Errorf("%s 需要一个普通文件作为输入", codec)
+	}
+	o, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer o.Close()
+	cw, err := newCompressor(codec, o, opt.Level, opt.Threads, opt.Dict)
+	if err != nil {
+		return err
+	}
+	if gz, ok := cw.(*gzip.Writer); ok {
+		gz.Name = path.Base(src.Name)
+		gz.ModTime = src.ModTime
+	}
+	if err := copyFile(cw, src, prog); err != nil {
+		return err
+	}
+	if err := cw.Close(); err != nil {
+		return err
+	}
+	return o.Close()
+}
+package main
+
+import (
+	"archive/tar"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/bodgit/sevenzip"
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
+	"github.com/nwaples/rardecode/v2"
+	"github.com/ulikunitz/xz"
+	yzip "github.com/yeka/zip"
+)
+
+// Entry 归档中的一个条目
+type Entry struct {
+	Name      string
+	Size      int64 // -1 表示未知
+	Packed    int64 // -1 表示未知
+	ModTime   time.Time
+	Mode      fs.FileMode
+	IsDir     bool
+	Link      string
+	HardLink  bool
+	Encrypted bool
+	CRC       uint32
+	HasCRC    bool
+}
+
+// WalkFunc 对每个条目调用；open 只能在回调内调用一次
+type WalkFunc func(e *Entry, open func() (io.ReadCloser, error)) error
+
+var errNeedPassword = errors.New("需要密码")
+
+func init() {
+	// zip 内的 zstd(93) / xz(95) 方法
+	yzip.RegisterDecompressor(93, func(r io.Reader) io.ReadCloser {
+		d, err := zstd.NewReader(r)
+		if err != nil {
+			return io.NopCloser(errReader{err})
+		}
+		return d.IOReadCloser()
+	})
+	yzip.RegisterDecompressor(95, func(r io.Reader) io.ReadCloser {
+		d, err := xz.NewReader(r)
+		if err != nil {
+			return io.NopCloser(errReader{err})
+		}
+		return io.NopCloser(d)
+	})
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+func walkArchive(path string, fm *Format, password string, fn WalkFunc) error {
+	switch {
+	case fm.Name == "7z":
+		return walk7z(path, password, fn)
+	case fm.Name == "zip":
+		return walkZip(path, password, fn)
+	case fm.Name == "rar":
+		return walkRar(path, password, fn)
+	case fm.Archive:
+		return walkTar(path, fm.Codec, fn)
+	default:
+		return walkSingle(path, fm, fn)
+	}
+}
+
+func walk7z(path, password string, fn WalkFunc) error {
+	r, err := sevenzip.OpenReaderWithPassword(path, password)
+	if err != nil {
+		return wrapPwErr(err, password)
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		info := f.FileInfo()
+		e := &Entry{Name: f.Name, Size: int64(f.UncompressedSize), Packed: -1, ModTime: f.Modified, Mode: info.Mode(), IsDir: info.IsDir(), CRC: f.CRC32, HasCRC: f.CRC32 != 0}
+		f := f
+		if err := fn(e, func() (io.ReadCloser, error) { return f.Open() }); err != nil {
+			return wrapPwErr(err, password)
+		}
+	}
+	return nil
+}
+
+func wrapPwErr(err error, password string) error {
+	if err == nil {
+		return nil
+	}
+	if password == "" && isPwError(err) {
+		return errNeedPassword
+	}
+	s := strings.ToLower(err.Error())
+	if password == "" && (strings.Contains(s, "password") || strings.Contains(s, "encrypt")) {
+		return errNeedPassword
+	}
+	if password != "" && (isPwError(err) || strings.Contains(s, "checksum") || strings.Contains(s, "password") || strings.Contains(s, "crc") || strings.Contains(s, "corrupt") || strings.Contains(s, "invalid") || strings.Contains(s, "authentication") || strings.Contains(s, "unexpected") || strings.Contains(s, "lzma")) {
+		return fmt.Errorf("%w（密码可能错误）", err)
+	}
+	return err
+}
+
+func walkZip(path, password string, fn WalkFunc) error {
+	r, err := yzip.OpenReader(path)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		info := f.FileInfo()
+		e := &Entry{Name: f.Name, Size: int64(f.UncompressedSize64), Packed: int64(f.CompressedSize64), ModTime: f.ModTime(), Mode: info.Mode(), IsDir: info.IsDir(), Encrypted: f.IsEncrypted(), CRC: f.CRC32, HasCRC: true}
+		f := f
+		err := fn(e, func() (io.ReadCloser, error) {
+			if f.IsEncrypted() {
+				if password == "" {
+					return nil, errNeedPassword
+				}
+				f.SetPassword(password)
+			}
+			return f.Open()
+		})
+		if err != nil {
+			return wrapPwErr(err, password)
+		}
+	}
+	return nil
+}
+
+func walkRar(path, password string, fn WalkFunc) error {
+	var opts []rardecode.Option
+	if password != "" {
+		opts = append(opts, rardecode.Password(password))
+	}
+	r, err := rardecode.OpenReader(path, opts...)
+	if err != nil {
+		return wrapPwErr(err, password)
+	}
+	defer r.Close()
+	for {
+		h, err := r.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return wrapPwErr(err, password)
+		}
+		e := &Entry{Name: h.Name, Size: h.UnPackedSize, Packed: h.PackedSize, ModTime: h.ModificationTime, Mode: h.Mode(), IsDir: h.IsDir, Encrypted: h.Encrypted}
+		if h.UnKnownSize {
+			e.Size = -1
+		}
+		if err := fn(e, func() (io.ReadCloser, error) { return io.NopCloser(r), nil }); err != nil {
+			return wrapPwErr(err, password)
+		}
+	}
+}
+
+func walkTar(path, codec string, fn WalkFunc) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	rc, err := newDecompressor(codec, f)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	tr := tar.NewReader(rc)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		info := h.FileInfo()
+		e := &Entry{Name: h.Name, Size: h.Size, Packed: -1, ModTime: h.ModTime, Mode: info.Mode(), IsDir: h.Typeflag == tar.TypeDir}
+		switch h.Typeflag {
+		case tar.TypeSymlink:
+			e.Link = h.Linkname
+		case tar.TypeLink:
+			e.Link = h.Linkname
+			e.HardLink = true
+		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
+		case tar.TypeXGlobalHeader:
+			continue
+		default:
+			continue
+		}
+		if err := fn(e, func() (io.ReadCloser, error) { return io.NopCloser(tr), nil }); err != nil {
+			return err
+		}
+	}
+}
+
+func walkSingle(path string, fm *Format, fn WalkFunc) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+	rc, err := newDecompressor(fm.Codec, f)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	name := filepath.Base(path)
+	for _, ext := range fm.Exts {
+		if strings.HasSuffix(strings.ToLower(name), ext) {
+			name = name[:len(name)-len(ext)]
+			break
+		}
+	}
+	mt := st.ModTime()
+	if gz, ok := rc.(*gzip.Reader); ok {
+		if gz.Name != "" {
+			name = filepath.Base(gz.Name)
+		}
+		if !gz.ModTime.IsZero() {
+			mt = gz.ModTime
+		}
+	}
+	if name == "" {
+		name = "data"
+	}
+	e := &Entry{Name: name, Size: -1, Packed: st.Size(), ModTime: mt, Mode: 0o644}
+	return fn(e, func() (io.ReadCloser, error) { return io.NopCloser(rc), nil })
+}

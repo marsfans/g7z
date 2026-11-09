@@ -1,7 +1,7 @@
 # g7z — 类 7-Zip 的多格式压缩工具（Go）
 
 库：cobra + pflag + viper + lipgloss/termenv + pterm；
-压缩：ulikunitz/xz（LZMA2/LZMA）、klauspost/compress（zstd/gzip/deflate/snappy）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）；
+压缩：ulikunitz/xz（LZMA2/LZMA）、klauspost/compress（zstd/gzip/deflate/snappy）、dsnet/compress（bzip2）、pierrec/lz4、andybalholm/brotli、yeka/zip（AES zip）、内置 bz3 子包（bzip3 纯 Go 移植，LGPLv3，产物与官方逐字节一致）；
 读取：bodgit/sevenzip（7z）、nwaples/rardecode（rar）；RAR5 写入为内置 rarpack 包（固实 / E8E9 过滤 / AES-256 加密 / 头部加密）。
 
 ## 命令（与 7z 一致）
@@ -30,12 +30,12 @@ g7z h -scrcSHA256 file.iso
 ```
 
 ## 格式
-写入：7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz
+写入：7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz
 读取：以上全部 + rar（RAR4/RAR5、加密、分卷）；7z/zip/rar 读写 AES-256，zip 读 ZipCrypto；
 格式按文件头魔数识别，不依赖扩展名。
 
 ## 7z 风格参数
-`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-md=64m` LZMA2 字典大小（7z/xz，覆盖 -mx 默认值）、`-mhe` 头部加密（7z / rar + 密码）、`-bcj=on|auto` x86 BCJ 过滤器（可执行文件，默认 off）、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
+`-mx0..9` 级别、`-mmtN` 线程、`-ms=64m|off` 固实块、`-md=64m` LZMA2 字典大小（7z/xz；对 bz3 为块大小，覆盖默认值）、`-mhe` 头部加密（7z / rar + 密码）、`-bcj=on|auto` x86 BCJ 过滤器（可执行文件，默认 off）、`-p` / `-pPASS` 密码、`-oDIR` 输出目录、`-tFMT` 格式、`-aoa/-aos/-aou` 覆盖/跳过/重命名、`-y` 全部覆盖、`-x 通配符` 排除。
 
 ## 配置
 `g7z config init` 生成 `g7z.yaml`（查找顺序：`--config`、`$G7Z_CONFIG`、`./g7z.yaml`、用户配置目录 `g7z/g7z.yaml`、`~/g7z.yaml`）。环境变量 `G7Z_LEVEL`、`G7Z_THREADS` 等同样生效。

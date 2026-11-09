@@ -50,15 +50,15 @@ no-color: false
 func rewriteArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	re := map[*regexp.Regexp]string{
-		regexp.MustCompile(`^-mx=?(\d)$`):          "--level=$1",
-		regexp.MustCompile(`^-md=?([\w]+)$`):       "--md=$1",
-		regexp.MustCompile(`^-mhe$`):              "--mhe",
+		regexp.MustCompile(`^-mx=?(\d)$`):           "--level=$1",
+		regexp.MustCompile(`^-md=?([\w]+)$`):        "--md=$1",
+		regexp.MustCompile(`^-mhe$`):                "--mhe",
 		regexp.MustCompile(`^-bcj=?(on|off|auto)$`): "--bcj=$1",
-		regexp.MustCompile(`^-mmt=?(\d+|on|off)$`): "--threads=$1",
-		regexp.MustCompile(`^-ms=?([\w]+)$`):       "--solid=$1",
-		regexp.MustCompile(`^-ao([asu])$`):         "--overwrite=$1",
-		regexp.MustCompile(`^-sccrc(\w+)$`):        "--algo=$1",
-		regexp.MustCompile(`^-scrc(\w+)$`):         "--algo=$1",
+		regexp.MustCompile(`^-mmt=?(\d+|on|off)$`):  "--threads=$1",
+		regexp.MustCompile(`^-ms=?([\w]+)$`):        "--solid=$1",
+		regexp.MustCompile(`^-ao([asu])$`):          "--overwrite=$1",
+		regexp.MustCompile(`^-sccrc(\w+)$`):         "--algo=$1",
+		regexp.MustCompile(`^-scrc(\w+)$`):          "--algo=$1",
 	}
 	afterDD := false
 	for _, a := range args {
@@ -189,7 +189,7 @@ func main() {
 		Short: "g7z — 类 7-Zip 的多格式压缩/解压工具",
 		Long: `g7z — 类 7-Zip 的多格式压缩/解压工具（Go 实现）
 
-写入: 7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz
+写入: 7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz
 读取: 以上全部；rar 支持 4/5；7z/zip/rar 支持 AES-256 加密
 兼容 7z 风格参数: -mx9  -mmt8  -ms=64m  -aoa/-aos/-aou  -p(交互输入密码)  -pPASS  -oDIR  -tzip`,
 		Version:       version,
@@ -315,7 +315,7 @@ func main() {
 			return nil
 		},
 	}
-	addCmd.Flags().StringP("type", "t", "7z", "归档格式（7z zip rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 xz zst lz4 br lzma sz）")
+	addCmd.Flags().StringP("type", "t", "7z", "归档格式（7z zip rar tar tar.gz tar.bz2 tar.bz3 tar.xz tar.zst tar.lz4 tar.br tar.lzma tar.sz gz bz2 bz3 xz zst lz4 br lzma sz）")
 	addCmd.Flags().Int("level", 5, "压缩级别 0-9，等同 -mx9")
 	addCmd.Flags().Int("threads", 0, "线程数，0=全部 CPU，等同 -mmt8")
 	addCmd.Flags().String("solid", "64m", "7z 固实块大小，off=不固实，等同 -ms=64m")

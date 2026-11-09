@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	bz3pkg "github.com/marsfans/g7z/bz3"
+
 	"github.com/andybalholm/brotli"
 	"github.com/dsnet/compress/bzip2"
 	"github.com/klauspost/compress/gzip"
@@ -37,6 +39,7 @@ var formats = []Format{
 	{Name: "tar", Exts: []string{".tar"}, Write: true, Read: true, Archive: true, Desc: "不压缩打包，保留权限与符号链接"},
 	{Name: "tar.gz", Exts: []string{".tar.gz", ".tgz"}, Write: true, Read: true, Archive: true, Codec: "gz", Desc: "tar + gzip"},
 	{Name: "tar.bz2", Exts: []string{".tar.bz2", ".tbz2", ".tbz"}, Write: true, Read: true, Archive: true, Codec: "bz2", Desc: "tar + bzip2"},
+	{Name: "tar.bz3", Exts: []string{".tar.bz3", ".tbz3"}, Write: true, Read: true, Archive: true, Codec: "bz3", Desc: "tar + bzip3"},
 	{Name: "tar.xz", Exts: []string{".tar.xz", ".txz"}, Write: true, Read: true, Archive: true, Codec: "xz", Desc: "tar + xz (LZMA2)"},
 	{Name: "tar.zst", Exts: []string{".tar.zst", ".tzst", ".tar.zstd"}, Write: true, Read: true, Archive: true, Codec: "zst", Desc: "tar + zstd（多线程）"},
 	{Name: "tar.lz4", Exts: []string{".tar.lz4", ".tlz4"}, Write: true, Read: true, Archive: true, Codec: "lz4", Desc: "tar + lz4（多线程）"},
@@ -46,6 +49,7 @@ var formats = []Format{
 	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
 	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
 	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
+	{Name: "bz3", Exts: []string{".bz3"}, Write: true, Read: true, Codec: "bz3", Desc: "单文件 bzip3（内置纯 Go 移植）"},
 	{Name: "xz", Exts: []string{".xz"}, Write: true, Read: true, Codec: "xz", Desc: "单文件 xz"},
 	{Name: "zst", Exts: []string{".zst", ".zstd"}, Write: true, Read: true, Codec: "zst", Desc: "单文件 zstd"},
 	{Name: "lz4", Exts: []string{".lz4"}, Write: true, Read: true, Codec: "lz4", Desc: "单文件 lz4"},
@@ -56,7 +60,7 @@ var formats = []Format{
 
 func formatByName(name string) (*Format, error) {
 	n := strings.ToLower(strings.TrimPrefix(name, "."))
-	alias := map[string]string{"tgz": "tar.gz", "tbz2": "tar.bz2", "txz": "tar.xz", "tzst": "tar.zst", "tlzma": "tar.lzma", "gzip": "gz", "bzip2": "bz2", "zstd": "zst", "brotli": "br", "snappy": "sz", "tar.zstd": "tar.zst"}
+	alias := map[string]string{"tgz": "tar.gz", "tbz2": "tar.bz2", "tbz3": "tar.bz3", "txz": "tar.xz", "tzst": "tar.zst", "tlzma": "tar.lzma", "gzip": "gz", "bzip2": "bz2", "bzip3": "bz3", "zstd": "zst", "brotli": "br", "snappy": "sz", "tar.zstd": "tar.zst"}
 	if a, ok := alias[n]; ok {
 		n = a
 	}
@@ -106,6 +110,8 @@ func sniffFormat(path string) (*Format, error) {
 		codec = "gz"
 	case bytes.HasPrefix(head, []byte("BZh")):
 		codec = "bz2"
+	case bytes.HasPrefix(head, []byte("BZ3v1")):
+		codec = "bz3"
 	case bytes.HasPrefix(head, []byte{0xFD, '7', 'z', 'X', 'Z', 0x00}):
 		codec = "xz"
 	case bytes.HasPrefix(head, []byte{0x28, 0xB5, 0x2F, 0xFD}):
@@ -200,6 +206,8 @@ func newDecompressor(codec string, r io.Reader) (io.ReadCloser, error) {
 		return nopCloser{zr}, nil
 	case "sz":
 		return nopCloser{snappy.NewReader(br)}, nil
+	case "bz3":
+		return bz3pkg.NewReader(br)
 	case "":
 		return nopCloser{br}, nil
 	}
@@ -252,6 +260,13 @@ func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.
 		return cfg.NewWriter(w)
 	case "sz":
 		return snappy.NewWriter(w), nil
+	case "bz3":
+		// md 复用为块大小（在合法范围内时），否则用默认 16MiB
+		bs := bz3pkg.DefaultBlockSize
+		if md >= bz3pkg.MinBlockSize && md <= bz3pkg.MaxBlockSize {
+			bs = int(md)
+		}
+		return bz3pkg.NewWriter(w, bs)
 	}
 	return nil, fmt.Errorf("未知压缩算法 %s", codec)
 }
