@@ -9,7 +9,7 @@ require (
 	github.com/dsnet/compress v0.0.1
 	github.com/klauspost/compress v1.20.1
 	github.com/muesli/termenv v0.16.0
-	github.com/nwaples/rardecode/v2 v2.4.1
+	github.com/nwaples/rardecode/v2 v2.4.6
 	github.com/pierrec/lz4/v4 v4.1.33
 	github.com/pterm/pterm v0.12.83
 	github.com/spf13/cobra v1.10.2
