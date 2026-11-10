@@ -4,6 +4,11 @@
 
 package lzma
 
+import (
+	"encoding/binary"
+	"math/bits"
+)
+
 // Optimal (price-guided) parsing for the LZMA encoder, ported from
 // liblzma's lzma_encoder_optimum_normal.c (Igor Pavlov, 0BSD). The
 // parser evaluates literal, match and rep-match candidates for a
@@ -163,6 +168,22 @@ func (p *optPricer) distLenPrice(dist, len, posState uint32) uint32 {
 	return pr + p.lenPrices[posState][len-minMatchLen]
 }
 
+// distParts returns the distance part of the match price for every
+// length state, so callers evaluating one distance at many lengths
+// can hoist it out of the length loop:
+// distLenPrice(dist, len, ps) == distParts(dist)[lenState(len-2)] +
+// lenPrices[ps][len-2].
+func (p *optPricer) distParts(dist uint32) (parts [4]uint32) {
+	for ds := uint32(0); ds < 4; ds++ {
+		if dist < 128 {
+			parts[ds] = p.distPrices[ds][dist]
+		} else {
+			parts[ds] = p.distSlotPrices[ds][distSlot(dist)] + p.alignPrices[dist&15]
+		}
+	}
+	return parts
+}
+
 // pureRepPrice returns the price of the rep selection bits for
 // rep index i (excluding length and the isMatch/isRep bits).
 func pureRepPrice(st *state, i, stIdx, posState uint32) uint32 {
@@ -228,12 +249,15 @@ type optMatch struct {
 // installed in the encoder dictionary, but the optimal parser drives
 // it directly; Write and NextOp are not used by the encoder loop.
 type optFinder struct {
-	dict  *encoderDict
-	head  []int32
-	prev  []int32
-	next  int64
-	depth int
-	cap   int
+	dict    *encoderDict
+	head    []int32
+	prev    []int32
+	next    int64
+	nextIdx int
+	nextCyc int64
+	idxOK   bool
+	depth   int
+	cap     int
 }
 
 func newOptFinder(dictCap, depth int) *optFinder {
@@ -268,29 +292,66 @@ func (f *optFinder) byteAt(pos int64) byte {
 	if pos < 0 {
 		return 0
 	}
+	return f.dict.buf.data[f.index(pos)]
+}
+
+// index maps an absolute stream position to its ring buffer index
+// (one modulo). at reads the byte off bytes after a ring index,
+// wrapping at most once for the small offsets used here.
+func (f *optFinder) index(pos int64) int {
 	d := f.dict
 	n := len(d.buf.data)
 	i := (d.buf.rear + int(pos-d.head)) % n
 	if i < 0 {
 		i += n
 	}
-	return d.buf.data[i]
+	return i
+}
+
+// at reads the byte off bytes after a ring index. Callers keep
+// -len(data) < off < len(data), so one conditional wrap suffices.
+func (f *optFinder) at(idx, off int) byte {
+	data := f.dict.buf.data
+	i := idx + off
+	if i >= len(data) {
+		i -= len(data)
+	} else if i < 0 {
+		i += len(data)
+	}
+	return data[i]
+}
+
+// adv advances a ring index by k (0 <= k < ring size).
+func (f *optFinder) adv(idx, k int) int {
+	i := idx + k
+	if n := len(f.dict.buf.data); i >= n {
+		i -= n
+	}
+	return i
+}
+
+// sub moves a ring index back by d (0 <= d < ring size); used with
+// match distances, which are always smaller than the ring.
+func (f *optFinder) sub(idx, d int) int {
+	i := idx - d
+	if i < 0 {
+		i += len(f.dict.buf.data)
+	}
+	return i
 }
 
 // matchLen returns the length of the common prefix of the byte
 // sequences at absolute positions a and b, capped at limit.
 func (f *optFinder) matchLen(a, b int64, limit int) int {
-	d := f.dict
-	data := d.buf.data
+	return f.matchLenIdx(f.index(a), f.index(b), limit)
+}
+
+// matchLenIdx is matchLen on precomputed ring indices. It compares
+// eight bytes at a time inside each ring segment; results are
+// identical to the byte-wise loop.
+func (f *optFinder) matchLenIdx(i, j int, limit int) int {
+	data := f.dict.buf.data
 	n := len(data)
-	i := (d.buf.rear + int(a-d.head)) % n
-	if i < 0 {
-		i += n
-	}
-	j := (d.buf.rear + int(b-d.head)) % n
-	if j < 0 {
-		j += n
-	}
 	l := 0
 	for l < limit {
 		ri, rj := n-i, n-j
@@ -302,6 +363,14 @@ func (f *optFinder) matchLen(a, b int64, limit int) int {
 			r = rem
 		}
 		k := 0
+		for k+8 <= r {
+			x := binary.LittleEndian.Uint64(data[i+k:]) ^
+				binary.LittleEndian.Uint64(data[j+k:])
+			if x != 0 {
+				return l + k + bits.TrailingZeros64(x)/8
+			}
+			k += 8
+		}
 		for k < r && data[i+k] == data[j+k] {
 			k++
 		}
@@ -322,31 +391,48 @@ func (f *optFinder) matchLen(a, b int64, limit int) int {
 }
 
 func (f *optFinder) hashAt(pos int64) uint32 {
-	x := uint32(f.byteAt(pos)) |
-		uint32(f.byteAt(pos+1))<<8 |
-		uint32(f.byteAt(pos+2))<<16 |
-		uint32(f.byteAt(pos+3))<<24
+	return f.hashIdx(f.index(pos))
+}
+
+func (f *optFinder) hashIdx(i int) uint32 {
+	x := uint32(f.at(i, 0)) |
+		uint32(f.at(i, 1))<<8 |
+		uint32(f.at(i, 2))<<16 |
+		uint32(f.at(i, 3))<<24
 	return (x * 0x9E3779B1) >> 16
 }
 
-func (f *optFinder) insert(pos int64) {
-	if pos >= 1<<31-1 {
-		return
-	}
-	h := f.hashAt(pos)
-	f.prev[pos%int64(f.cap)] = f.head[h]
-	f.head[h] = int32(pos)
-}
-
 // insertUpTo inserts all positions before upto (as far as four
-// bytes are available, i.e. position+4 <= availEnd).
+// bytes are available, i.e. position+4 <= availEnd). Positions are
+// inserted in increasing order, so the ring index and the cyclic
+// prev slot are tracked incrementally instead of recomputed with
+// divisions.
 func (f *optFinder) insertUpTo(upto, availEnd int64) {
+	n := len(f.dict.buf.data)
+	cap64 := int64(f.cap)
 	for f.next < upto {
 		if f.next+4 > availEnd {
 			return
 		}
-		f.insert(f.next)
+		if !f.idxOK {
+			f.nextIdx = f.index(f.next)
+			f.nextCyc = f.next % cap64
+			f.idxOK = true
+		}
+		if f.next < 1<<31-1 {
+			h := f.hashIdx(f.nextIdx)
+			f.prev[f.nextCyc] = f.head[h]
+			f.head[h] = int32(f.next)
+		}
 		f.next++
+		f.nextIdx++
+		if f.nextIdx >= n {
+			f.nextIdx -= n
+		}
+		f.nextCyc++
+		if f.nextCyc >= cap64 {
+			f.nextCyc -= cap64
+		}
 	}
 }
 
@@ -363,20 +449,45 @@ func (f *optFinder) findMatches(pos int64, limit int, out []optMatch) ([]optMatc
 	if availEnd-pos < 4 {
 		return out, 0
 	}
-	h := f.hashAt(pos)
+	data := f.dict.buf.data
+	n := len(data)
+	ip := f.index(pos)
+	h := f.hashIdx(ip)
+	cap64 := int64(f.cap)
+	pIdx := pos % cap64
+	prev := f.prev
 	best := 1
 	q := int64(f.head[h])
 	for depth := f.depth; q >= 0 && depth > 0; depth-- {
 		dist := pos - q
-		if dist <= 0 || dist > int64(f.cap) {
+		if dist <= 0 || dist > cap64 {
 			break
 		}
-		if best < limit &&
-			f.byteAt(pos+int64(best)) != f.byteAt(q+int64(best)) {
-			q = int64(f.prev[q%int64(f.cap)])
-			continue
+		// Candidate indices come from ip/pIdx by subtracting the
+		// distance (always < ring size), avoiding divisions.
+		iq := ip - int(dist)
+		if iq < 0 {
+			iq += n
 		}
-		l := f.matchLen(pos, q, limit)
+		qIdx := pIdx - dist
+		if qIdx < 0 {
+			qIdx += cap64
+		}
+		if best < limit {
+			ib := ip + best
+			if ib >= n {
+				ib -= n
+			}
+			jb := iq + best
+			if jb >= n {
+				jb -= n
+			}
+			if data[ib] != data[jb] {
+				q = int64(prev[qIdx])
+				continue
+			}
+		}
+		l := f.matchLenIdx(ip, iq, limit)
 		if l > best {
 			best = l
 			out = append(out, optMatch{len: uint32(l), dist: uint32(dist - 1)})
@@ -384,7 +495,7 @@ func (f *optFinder) findMatches(pos int64, limit int, out []optMatch) ([]optMatc
 				break
 			}
 		}
-		q = int64(f.prev[q%int64(f.cap)])
+		q = int64(prev[qIdx])
 	}
 	if best < 2 {
 		return out[:0], 0
@@ -536,12 +647,13 @@ func (o *optParser) window(e *encoder) {
 	matches, lenMain := f.findMatches(H, int(avail0), o.curMatches[:0])
 	o.curMatches = matches
 
+	iH := f.index(H)
 	var repLens [4]uint32
 	repMax := 0
 	for i := 0; i < 4; i++ {
 		d := int64(st.rep[i]) + 1
 		if avail0 >= 2 && H >= d {
-			if l := f.matchLen(H, H-d, int(avail0)); l >= 2 {
+			if l := f.matchLenIdx(iH, f.sub(iH, int(d)), int(avail0)); l >= 2 {
 				repLens[i] = uint32(l)
 			}
 		}
@@ -560,10 +672,10 @@ func (o *optParser) window(e *encoder) {
 		return
 	}
 
-	curByte := f.byteAt(H)
+	curByte := f.at(iH, 0)
 	matchByte := byte(0)
 	if H >= int64(st.rep[0])+1 {
-		matchByte = f.byteAt(H - int64(st.rep[0]) - 1)
+		matchByte = f.at(iH, -int(st.rep[0])-1)
 	}
 	if lenMain < 2 && curByte != matchByte && repLens[repMax] < 2 {
 		o.emit(optOp{back: backLiteral, n: 1, b: curByte})
@@ -579,7 +691,7 @@ func (o *optParser) window(e *encoder) {
 	state2 := (st.state << maxPosBits) | posState
 
 	opts[1].price = bit0Price(st.isMatch[state2]) +
-		literalPrice(st, H, f.byteAt(H-1), !isLiteralState(st.state),
+		literalPrice(st, H, f.at(iH, -1), !isLiteralState(st.state),
 			matchByte, curByte)
 	makeLiteral(&opts[1])
 
@@ -641,12 +753,20 @@ func (o *optParser) window(e *encoder) {
 		for int(matches[i].len) < startLen {
 			i++
 		}
+		var parts [4]uint32
+		partsDist := ^uint32(0)
 		for l := startLen; ; l++ {
 			for int(matches[i].len) < l {
 				i++
 			}
 			dist := matches[i].dist
-			p := normalMatchPrice + o.pricer.distLenPrice(dist, uint32(l), posState)
+			if dist != partsDist {
+				parts = o.pricer.distParts(dist)
+				partsDist = dist
+			}
+			p := normalMatchPrice +
+				parts[lenState(uint32(l)-minMatchLen)] +
+				o.pricer.lenPrices[posState][l-minMatchLen]
 			if p < opts[l].price {
 				opts[l].price = p
 				opts[l].posPrev = 0
@@ -797,16 +917,17 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 	curPrice := opts[cur].price
 	reps := o.reps
 
-	curByte := f.byteAt(pos)
+	ip := f.index(pos)
+	curByte := f.at(ip, 0)
 	matchByte := byte(0)
 	if pos >= int64(reps[0])+1 {
-		matchByte = f.byteAt(pos - int64(reps[0]) - 1)
+		matchByte = f.at(ip, -int(reps[0])-1)
 	}
 	posState := uint32(pos) & st.posBitMask
 	state2 := (stIdx << maxPosBits) | posState
 
 	curAnd1Price := curPrice + bit0Price(st.isMatch[state2]) +
-		literalPrice(st, pos, f.byteAt(pos-1), !isLiteralState(stIdx),
+		literalPrice(st, pos, f.at(ip, -1), !isLiteralState(stIdx),
 			matchByte, curByte)
 
 	nextIsLiteral := false
@@ -841,14 +962,14 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 
 	// Trial: literal at cur, then rep0 match.
 	if !nextIsLiteral && matchByte != curByte {
-		src := pos - int64(reps[0]) - 1
 		limit := bufAvailFull
 		if m := int(o.niceLen) + 1; limit > m {
 			limit = m
 		}
 		lenTest := 0
 		if limit > 1 {
-			lenTest = f.matchLen(pos+1, src+1, limit-1)
+			isrc := f.sub(ip, int(reps[0])+1)
+			lenTest = f.matchLenIdx(f.adv(ip, 1), f.adv(isrc, 1), limit-1)
 		}
 		if lenTest >= 2 {
 			st2 := stateAfterLiteral(stIdx)
@@ -875,11 +996,11 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 
 	// Rep matches.
 	for repIndex := 0; repIndex < 4; repIndex++ {
-		src := pos - int64(reps[repIndex]) - 1
 		if pos < int64(reps[repIndex])+1 {
 			continue
 		}
-		lenTest := f.matchLen(pos, src, bufAvail)
+		isrc := f.sub(ip, int(reps[repIndex])+1)
+		lenTest := f.matchLenIdx(ip, isrc, bufAvail)
 		if lenTest < 2 {
 			continue
 		}
@@ -909,8 +1030,8 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 		}
 		lenTest2 := 0
 		if lenTest+1 < limit {
-			lenTest2 = f.matchLen(pos+int64(lenTest)+1,
-				src+int64(lenTest)+1, limit-lenTest-1)
+			lenTest2 = f.matchLenIdx(f.adv(ip, lenTest+1),
+				f.adv(isrc, lenTest+1), limit-lenTest-1)
 		}
 		if lenTest2 >= 2 {
 			st2 := stateAfterRep(stIdx)
@@ -919,9 +1040,9 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 				o.pricer.repLenPrices[posState][lenTest-minMatchLen] +
 				bit0Price(st.isMatch[(st2<<maxPosBits)|posStateNext]) +
 				literalPrice(st, pos+int64(lenTest),
-					f.byteAt(pos+int64(lenTest)-1), true,
-					f.byteAt(src+int64(lenTest)),
-					f.byteAt(pos+int64(lenTest)))
+					f.at(ip, lenTest-1), true,
+					f.at(isrc, lenTest),
+					f.at(ip, lenTest))
 			st2 = stateAfterLiteral(st2)
 			posStateNext = uint32(pos+int64(lenTest)+1) & st.posBitMask
 			nextRepMatchPrice := curAndLenLitPrice +
@@ -965,13 +1086,20 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 		for int(matches[i].len) < startLen {
 			i++
 		}
+		var parts [4]uint32
+		partsDist := ^uint32(0)
 		for lenTest := startLen; ; lenTest++ {
 			for int(matches[i].len) < lenTest {
 				i++
 			}
 			curBack := matches[i].dist
+			if curBack != partsDist {
+				parts = o.pricer.distParts(curBack)
+				partsDist = curBack
+			}
 			curAndLenPrice := normalMatchPrice +
-				o.pricer.distLenPrice(curBack, uint32(lenTest), posState)
+				parts[lenState(uint32(lenTest)-minMatchLen)] +
+				o.pricer.lenPrices[posState][lenTest-minMatchLen]
 			if curAndLenPrice < opts[cur+lenTest].price {
 				opts[cur+lenTest].price = curAndLenPrice
 				opts[cur+lenTest].posPrev = uint32(cur)
@@ -980,15 +1108,15 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 			}
 			if lenTest == int(matches[i].len) {
 				// Trial: this match, then a literal, then rep0.
-				src := pos - int64(curBack) - 1
+				isrc := f.sub(ip, int(curBack)+1)
 				limit := bufAvailFull
 				if m := lenTest + 1 + int(o.niceLen); limit > m {
 					limit = m
 				}
 				lenTest2 := 0
 				if lenTest+1 < limit {
-					lenTest2 = f.matchLen(pos+int64(lenTest)+1,
-						src+int64(lenTest)+1, limit-lenTest-1)
+					lenTest2 = f.matchLenIdx(f.adv(ip, lenTest+1),
+						f.adv(isrc, lenTest+1), limit-lenTest-1)
 				}
 				if lenTest2 >= 2 {
 					st2 := stateAfterMatch(stIdx)
@@ -996,9 +1124,9 @@ func (o *optParser) helper2(e *encoder, cur int, pos int64,
 					curAndLenLitPrice := curAndLenPrice +
 						bit0Price(st.isMatch[(st2<<maxPosBits)|posStateNext]) +
 						literalPrice(st, pos+int64(lenTest),
-							f.byteAt(pos+int64(lenTest)-1), true,
-							f.byteAt(src+int64(lenTest)),
-							f.byteAt(pos+int64(lenTest)))
+							f.at(ip, lenTest-1), true,
+							f.at(isrc, lenTest),
+							f.at(ip, lenTest))
 					st2 = stateAfterLiteral(st2)
 					posStateNext = uint32(pos+int64(lenTest)+1) & st.posBitMask
 					nextRepMatchPrice := curAndLenLitPrice +
