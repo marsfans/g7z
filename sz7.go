@@ -21,7 +21,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/ulikunitz/xz/lzma"
+	"github.com/marsfans/g7z/lzma"
 )
 
 type SZOptions struct {
@@ -243,6 +243,14 @@ func compressFolder(fd *szFolder, opt SZOptions, key []byte, prog *Progress) err
 	var bcjW *bcjX86Writer
 	if opt.Level > 0 {
 		cfg := lzma.Writer2Config{DictCap: resolveDict(opt.Dict, opt.Level, fd.unpackSize)}
+		if opt.Level >= 5 {
+			// 5 级起使用最优解析器（fork lzma 的 Optimal 模式）：
+			// 以数倍 CPU 时间换接近官方的压缩率。低级别保留
+			// HashTable4 快路径。
+			cfg.Optimal = true
+			cfg.NiceLen = niceLenForLevel(opt.Level)
+			cfg.Depth = depthForLevel(opt.Level)
+		}
 		lz, err = cfg.NewWriter2(codedCounter)
 		if err != nil {
 			return err

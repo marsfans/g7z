@@ -301,6 +301,35 @@ func newCompressor(codec string, w io.Writer, level, threads int, md int64) (io.
 // （2026-11-10 对官方 7zz 25.01 逐级实测：1:256k 3:4m 5:32m
 // 7:48m 9:64m，偶数级别取插值；官方在内存受限环境会把大字典
 // 压到 48m，本地表按其标称值）。
+// niceLenForLevel 给最优解析器选 nice_len（对标 7-Zip 的
+// NumFastBytes：mx5=32、mx7=64、mx9=273）。
+func niceLenForLevel(level int) int {
+	switch {
+	case level <= 5:
+		return 32
+	case level <= 7:
+		return 64
+	case level <= 8:
+		return 128
+	default:
+		return 273
+	}
+}
+
+// depthForLevel 给最优解析器的哈希链匹配器选搜索深度。
+func depthForLevel(level int) int {
+	switch {
+	case level <= 5:
+		return 32
+	case level <= 7:
+		return 64
+	case level <= 8:
+		return 96
+	default:
+		return 128
+	}
+}
+
 func dictForLevel(level int) int {
 	switch {
 	case level <= 1:
