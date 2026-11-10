@@ -334,7 +334,19 @@ func main() {
 			Use:     use + " <归档> [要解压的文件/通配符...]",
 			Aliases: aliases,
 			Short:   short,
-			Args:    cobra.MinimumNArgs(1),
+			Args: func(cmd *cobra.Command, args []string) error {
+				if len(args) > 0 {
+					return nil
+				}
+				// Windows 命令行转义陷阱: 被引号包住、又以反斜杠结尾的
+				// 路径 (如 -o "D:\dir\") 会使结束引号被当成转义, 后面的
+				// 归档路径被吞进 -o 的值, 表现为“收到 0 个参数”。
+				// -o 的值里出现引号即是此特征, 给出针对性提示。
+				if out, _ := cmd.Flags().GetString("output"); strings.Contains(out, "\"") {
+					return fmt.Errorf("未收到归档路径: -o 的值 %q 中混有引号, 多半是输出路径以 \\ 结尾又被引号包住, 被 Windows 命令行转义吞掉了后面的归档路径。去掉路径末尾的 \\ 再试, 如 -o \"D:\\dir\"", out)
+				}
+				return fmt.Errorf("需要至少 1 个参数 (归档路径), 实际收到 0 个")
+			},
 			RunE: func(cmd *cobra.Command, args []string) error {
 				archive := args[0]
 				fm, pw, err := prepareRead(cmd, archive)
