@@ -59,6 +59,9 @@ var formats = []Format{
 	{Name: "rar", Exts: []string{".rar"}, Write: true, Read: true, Archive: true, Desc: "写 RAR5（固实 / E8E9 过滤 / 加密），读 RAR4 / RAR5，含分卷", Password: "读写 AES-256"},
 	{Name: "ar", Exts: []string{".ar", ".a"}, Read: true, Archive: true, Desc: "ar 归档（只读）"},
 	{Name: "deb", Exts: []string{".deb"}, Read: true, Archive: true, Desc: "Debian 软件包（ar 容器，只读，成员可再解开）"},
+	{Name: "iso", Exts: []string{".iso"}, Write: true, Read: true, Archive: true, Desc: "ISO 9660 光盘镜像（Rock Ridge 长文件名）"},
+	{Name: "cab", Exts: []string{".cab"}, Write: true, Read: true, Archive: true, Desc: "Microsoft Cabinet（MSZIP / LZX）"},
+	{Name: "wim", Exts: []string{".wim", ".swm", ".esd"}, Write: true, Read: true, Archive: true, Desc: "Windows 映像（XPRESS / LZX）"},
 	{Name: "gz", Exts: []string{".gz", ".gzip"}, Write: true, Read: true, Codec: "gz", Desc: "单文件 gzip"},
 	{Name: "bz2", Exts: []string{".bz2"}, Write: true, Read: true, Codec: "bz2", Desc: "单文件 bzip2"},
 	{Name: "bz3", Exts: []string{".bz3"}, Write: true, Read: true, Codec: "bz3", Desc: "单文件 bzip3（内置纯 Go 移植）"},
@@ -120,6 +123,10 @@ func sniffFormat(path string) (*Format, error) {
 		return formatByName("rar")
 	case bytes.HasPrefix(head, []byte("070701")), bytes.HasPrefix(head, []byte("070702")):
 		return formatByName("cpio")
+	case bytes.HasPrefix(head, []byte("MSCF")):
+		return formatByName("cab")
+	case bytes.HasPrefix(head, []byte("MSWIM\x00\x00\x00")):
+		return formatByName("wim")
 	case bytes.HasPrefix(head, []byte("!<arch>\n")):
 		if byExt != nil && byExt.Name == "deb" {
 			return formatByName("deb")
@@ -143,6 +150,13 @@ func sniffFormat(path string) (*Format, error) {
 		return formatByName("tar")
 	}
 	if codec == "" {
+		// ISO 9660 的签名在 32KiB 系统区之后，单独探一次
+		if _, err := f.Seek(32769, io.SeekStart); err == nil {
+			sig := make([]byte, 5)
+			if _, err := io.ReadFull(f, sig); err == nil && string(sig) == "CD001" {
+				return formatByName("iso")
+			}
+		}
 		if byExt != nil && byExt.Read {
 			if byExt.Codec == "br" || byExt.Codec == "lzma" || byExt.Name == "tar" {
 				return byExt, nil

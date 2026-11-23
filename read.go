@@ -73,6 +73,12 @@ func walkArchive(path string, fm *Format, password string, fn WalkFunc) error {
 		return walkAr(path, fn)
 	case strings.HasPrefix(fm.Name, "cpio"):
 		return walkCpio(path, fm.Codec, fn)
+	case fm.Name == "iso":
+		return walkISO(path, fn)
+	case fm.Name == "cab":
+		return walkCab(path, fn)
+	case fm.Name == "wim":
+		return walkWim(path, fn)
 	case fm.Archive:
 		return walkTar(path, fm.Codec, fn)
 	default:

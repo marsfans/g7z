@@ -164,6 +164,12 @@ func createArchive(out string, files []*InputFile, opt AddOptions, prog *Progres
 		err = writeRar(tmpOut, files, opt, prog)
 	case strings.HasPrefix(fm.Name, "cpio"):
 		err = writeCpio(tmpOut, files, fm.Codec, opt, prog)
+	case fm.Name == "iso":
+		err = writeISO(tmpOut, files, opt, prog)
+	case fm.Name == "cab":
+		err = writeCab(tmpOut, files, opt, prog)
+	case fm.Name == "wim":
+		err = writeWim(tmpOut, files, opt, prog)
 	case fm.Archive: // tar.*
 		err = writeTar(tmpOut, files, fm.Codec, opt, prog)
 	default:

@@ -3,11 +3,13 @@ module github.com/marsfans/g7z
 go 1.27.1
 
 require (
+	github.com/Microsoft/go-winio v0.6.4
+	github.com/abemedia/go-cabinet v0.3.0
 	github.com/andybalholm/brotli v1.2.6
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dsnet/compress v0.0.1
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/muesli/termenv v0.16.0
 	github.com/nwaples/rardecode/v2 v2.4.6
 	github.com/pierrec/lz4/v4 v4.1.33
@@ -54,6 +56,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
